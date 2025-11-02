@@ -46,3 +46,6 @@ Thumbs.db
 *.db
 *.sqlite
 
+# Data files
+*.csv
+
