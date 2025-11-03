@@ -1,199 +1,147 @@
-# AI Sleep Coach Database Query Service
+# Sleep Coach LLM API Service
 
-An AI-powered service that answers natural language questions about sleep and health data stored in a MySQL database using a locally hosted LLM.
+AI-powered Sleep Coach service with wearable data processing and LLM integration. Processes sleep data from wearables, provides personalized insights, and answers questions using a local LLM.
 
-## Features
+## Quick Start
 
-- 🤖 Natural language query interface using LLM
-- 🗄️ MySQL database integration
-- 📊 Schema introspection and sample data retrieval
-- 🔍 Health check endpoints
-- 🚀 FastAPI REST API
-- 📝 Comprehensive logging
+### 1. Install Dependencies
 
-## Prerequisites
+```bash
+pip install -r requirements.txt
+```
 
-- Python 3.8 or higher
-- MySQL database with the sleep coach data
-- Ollama LLM service running at the configured endpoint
-- Network access to both MySQL and Ollama services
+### 2. Set Up Environment Variables
 
-## Installation
+Create a `.env` file from the template:
 
-1. **Clone the repository**
-   ```bash
-   git clone <your-repo-url>
-   cd LocalLLM
-   ```
+```bash
+cp env.example .env
+```
 
-2. **Create a virtual environment (recommended)**
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+Edit `.env` with your credentials:
+```
+MYSQL_HOST=62.72.57.99
+MYSQL_USER=aabo
+MYSQL_PASSWORD=3#hxFkBFKJ2Ph!$@
+MYSQL_DATABASE=aaboRing10Jan
+OLLAMA_API_URL=http://34.131.0.29:11434/api/generate
 
-3. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+# Optional: For Pinecone vector database
+OPENAI_API_KEY=your_key_here
+PINECONE_API_KEY=your_key_here
+PINECONE_ENV=us-east-1
+PINECONE_INDEX_NAME=aabosleepcoach
+```
 
-4. **Configure environment variables**
-   ```bash
-   cp env.example .env
-   ```
-   
-   Edit `.env` with your actual credentials:
-   ```
-   MYSQL_HOST=your_mysql_host
-   MYSQL_USER=your_mysql_user
-   MYSQL_PASSWORD=your_mysql_password
-   MYSQL_DATABASE=your_database_name
-   OLLAMA_API_URL=http://your_ollama_host:11434/api/generate
-   ```
-
-## Usage
-
-### Start the Service
+### 3. Run the Service
 
 ```bash
 python app.py
 ```
 
-Or using uvicorn directly:
-
+Or with uvicorn:
 ```bash
 uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-The service will be available at `http://localhost:8000`
-
-### API Endpoints
-
-#### Health Check
+Or with Docker:
 ```bash
-GET /health
-```
-Returns the health status of the service and its dependencies.
-
-#### Root
-```bash
-GET /
-```
-Returns API information and available endpoints.
-
-#### Get Database Schema
-```bash
-GET /schema?table_name=ai_coach_modules_summary
-```
-Returns the schema of the specified table.
-
-#### Get Database Statistics
-```bash
-GET /stats?table_name=ai_coach_modules_summary
-```
-Returns statistics about the specified table (row count, columns, etc.).
-
-#### Get Sample Data
-```bash
-GET /sample?table_name=ai_coach_modules_summary&limit=5
-```
-Returns sample rows from the specified table.
-
-#### Natural Language Query
-```bash
-POST /query
-Content-Type: application/json
-
-{
-  "question": "What is the average insomnia score for customers with High Risk classification?",
-  "table_name": "ai_coach_modules_summary"
-}
+docker-compose up --build
 ```
 
-#### Execute SQL Query
+## API Endpoints
+
+Once running, visit **http://localhost:8000/docs** for interactive API documentation.
+
+### Main Endpoints
+
+- **POST `/query`** - Ask questions about sleep data
+- **POST `/wearable`** - Submit wearable sleep data
+- **POST `/knowledge`** - Add knowledge documents to vector DB
+- **GET `/health`** - Health check
+- **GET `/stats`** - Database statistics
+- **GET `/trends/{user_id}`** - Get user sleep trends
+
+## Example Usage
+
+### Ask a Question
+
 ```bash
-POST /query/sql?query=SELECT * FROM ai_coach_modules_summary LIMIT 10
-```
-Executes a raw SQL SELECT query (for safety, only SELECT queries are allowed).
-
-### Example Usage with curl
-
-```bash
-# Health check
-curl http://localhost:8000/health
-
-# Ask a question
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "How many customers have High Risk insomnia classification?"}'
-
-# Get schema
-curl http://localhost:8000/schema
-
-# Get statistics
-curl http://localhost:8000/stats
+  -d '{
+    "user_id": "123",
+    "query": "How was my sleep over the last 7 days?"
+  }'
 ```
 
-### API Documentation
+### Submit Wearable Data
 
-Once the service is running, visit:
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
+```bash
+curl -X POST http://localhost:8000/wearable \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "123",
+    "date": "2024-11-02",
+    "sleep_duration": 7.5,
+    "deep_sleep": 1.2,
+    "rem_sleep": 1.8,
+    "light_sleep": 4.0
+  }'
+```
+
+### Get User Trends
+
+```bash
+curl http://localhost:8000/trends/123?days=30
+```
+
+## Example Queries
+
+- **Personal Data**: "How was my sleep over the last 7 days?", "What's my average sleep duration?"
+- **Cohort Comparison**: "How does my deep sleep compare to others?", "What percentile is my sleep?"
+- **Knowledge-Based**: "What's the importance of REM sleep?", "How can I improve sleep quality?"
 
 ## Project Structure
 
 ```
 LocalLLM/
-├── app.py              # FastAPI application and routes
-├── config.py           # Configuration management
-├── database.py         # MySQL database connection and queries
-├── llm_client.py       # Ollama LLM client
-├── requirements.txt      # Python dependencies
-├── .env.example        # Environment variables template
-├── .gitignore          # Git ignore rules
+├── app.py              # FastAPI application
+├── sleep_coach_llm.py  # Sleep Coach LLM system
+├── requirements.txt    # Python dependencies
+├── Dockerfile          # Docker configuration
+├── docker-compose.yml  # Docker Compose configuration
+├── env.example         # Environment variables template
 └── README.md          # This file
 ```
 
-## Configuration
+## Docker Deployment
 
-All configuration is done through environment variables:
+```bash
+# Build and run
+docker-compose up --build
 
-- `MYSQL_HOST`: MySQL server hostname or IP
-- `MYSQL_USER`: MySQL username
-- `MYSQL_PASSWORD`: MySQL password
-- `MYSQL_DATABASE`: Database name
-- `OLLAMA_API_URL`: Ollama API endpoint URL
+# View logs
+docker logs ai-sleep-coach-query -f
 
-## Security Notes
-
-- Never commit `.env` file to version control
-- Use strong passwords for database connections
-- Consider implementing authentication for production use
-- The SQL query endpoint only allows SELECT queries for safety
-- For production, consider adding rate limiting and API authentication
+# Restart
+docker-compose restart ai-query-service
+```
 
 ## Troubleshooting
 
-### Database Connection Issues
+### Database Connection
 - Verify MySQL credentials in `.env`
 - Check network connectivity to MySQL server
-- Ensure MySQL user has proper permissions
 
-### LLM API Issues
-- Verify Ollama API URL is correct and accessible
-- Check if Ollama service is running
-- Verify network connectivity to Ollama host
+### LLM API
+- Verify Ollama is running at `http://34.131.0.29:11434`
+- Test: `curl http://34.131.0.29:11434/api/version`
 
-### Import Errors
-- Ensure virtual environment is activated
-- Run `pip install -r requirements.txt` again
-- Check Python version (requires 3.8+)
+### Dependencies
+- Ensure all packages are installed: `pip install -r requirements.txt`
+- Check Python version: requires 3.8+
 
 ## License
 
-[Specify your license here]
-
-## Contributing
-
-[Add contribution guidelines if needed]
-
+[Your License Here]

@@ -1,17 +1,18 @@
 """
-AI Sleep Coach Database Query Service
-FastAPI application for AI-powered database query service
+Sleep Coach LLM FastAPI Service
+FastAPI application for Sleep Coach LLM system with wearable data processing
 """
 import os
+import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import logging
-import mysql.connector
-from mysql.connector import Error
-import requests
 from dotenv import load_dotenv
+
+# Import the sleep coach LLM system
+from sleep_coach_llm import SleepCoachLLM, Config
 
 # Load environment variables
 load_dotenv()
@@ -23,152 +24,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
-class Config:
-    """Application configuration"""
-    MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
-    MYSQL_USER = os.getenv("MYSQL_USER", "root")
-    MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
-    MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "")
-    OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
-    
-    @property
-    def mysql_config(self):
-        return {
-            "host": self.MYSQL_HOST,
-            "user": self.MYSQL_USER,
-            "password": self.MYSQL_PASSWORD,
-            "database": self.MYSQL_DATABASE,
-            "charset": "utf8mb4",
-            "collation": "utf8mb4_unicode_ci"
-        }
-
-config = Config()
-
-# Database class
-class Database:
-    """MySQL database connection manager"""
-    
-    def __init__(self):
-        self.connection: Optional[mysql.connector.MySQLConnection] = None
-    
-    def connect(self) -> bool:
-        """Establish connection to MySQL database"""
-        try:
-            self.connection = mysql.connector.connect(**config.mysql_config)
-            if self.connection.is_connected():
-                logger.info("Successfully connected to MySQL database")
-                return True
-        except Error as e:
-            logger.error(f"Error connecting to MySQL: {e}")
-            return False
-        return False
-    
-    def disconnect(self):
-        """Close database connection"""
-        if self.connection and self.connection.is_connected():
-            self.connection.close()
-            logger.info("MySQL connection closed")
-    
-    def execute_query(self, query: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
-        """Execute a SELECT query and return results as list of dictionaries"""
-        if not self.connection or not self.connection.is_connected():
-            if not self.connect():
-                raise ConnectionError("Failed to connect to database")
-        
-        try:
-            cursor = self.connection.cursor(dictionary=True)
-            cursor.execute(query, params or ())
-            results = cursor.fetchall()
-            cursor.close()
-            return results
-        except Error as e:
-            logger.error(f"Error executing query: {e}")
-            raise
-    
-    def get_table_schema(self, table_name: str = "ai_coach_modules_summary") -> List[Dict[str, Any]]:
-        """Get schema information for a table"""
-        query = """
-        SELECT 
-            COLUMN_NAME,
-            DATA_TYPE,
-            CHARACTER_MAXIMUM_LENGTH,
-            IS_NULLABLE,
-            COLUMN_DEFAULT
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
-        ORDER BY ORDINAL_POSITION
-        """
-        return self.execute_query(query, (config.MYSQL_DATABASE, table_name))
-    
-    def get_table_sample(self, table_name: str = "ai_coach_modules_summary", limit: int = 5) -> List[Dict[str, Any]]:
-        """Get sample rows from a table"""
-        query = f"SELECT * FROM {table_name} LIMIT %s"
-        return self.execute_query(query, (limit,))
-    
-    def get_table_stats(self, table_name: str = "ai_coach_modules_summary") -> Dict[str, Any]:
-        """Get basic statistics about a table"""
-        count_query = f"SELECT COUNT(*) as count FROM {table_name}"
-        result = self.execute_query(count_query)
-        return {
-            "table_name": table_name,
-            "row_count": result[0]["count"] if result else 0,
-            "columns": [col["COLUMN_NAME"] for col in self.get_table_schema(table_name)]
-        }
-
-# LLM Client class
-class LLMClient:
-    """Client for interacting with Ollama API"""
-    
-    def __init__(self):
-        self.api_url = config.OLLAMA_API_URL
-        self.default_model = "llama3"
-    
-    def generate(self, prompt: str, model: Optional[str] = None, stream: bool = False) -> Dict[str, Any]:
-        """Generate response from LLM"""
-        payload = {
-            "model": model or self.default_model,
-            "prompt": prompt,
-            "stream": stream
-        }
-        
-        try:
-            response = requests.post(self.api_url, json=payload, timeout=120)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error calling LLM API: {e}")
-            raise
-    
-    def answer_question(self, question: str, context: str) -> str:
-        """Generate an answer to a question based on context"""
-        prompt = f"""You are a helpful AI assistant that answers questions about sleep and health data from a database.
-
-Context information about the database:
-{context}
-
-User Question: {question}
-
-Please provide a clear, accurate, and helpful answer based on the context provided. If the question cannot be answered with the given context, say so clearly.
-"""
-        
-        try:
-            result = self.generate(prompt)
-            if "response" in result:
-                return result["response"].strip()
-            elif "text" in result:
-                return result["text"].strip()
-            else:
-                return str(result)
-        except Exception as e:
-            logger.error(f"Error generating answer: {e}")
-            return f"I apologize, but I encountered an error while processing your question: {str(e)}"
-
 # Initialize FastAPI app
 app = FastAPI(
-    title="AI Sleep Coach Database Query Service",
-    description="AI-powered service to answer questions about sleep and health data",
-    version="1.0.0"
+    title="Sleep Coach LLM API",
+    description="AI-powered Sleep Coach service with wearable data processing and LLM integration",
+    version="2.0.0"
 )
 
 # Add CORS middleware
@@ -180,46 +40,99 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize database and LLM client
-db = Database()
-llm_client = LLMClient()
+# Initialize Sleep Coach LLM system
+sleep_coach: Optional[SleepCoachLLM] = None
 
 # Request/Response models
 class QueryRequest(BaseModel):
-    question: str
-    table_name: Optional[str] = "ai_coach_modules_summary"
+    user_id: str
+    query: str
 
 class QueryResponse(BaseModel):
-    answer: str
-    context_used: Optional[Dict[str, Any]] = None
+    query: str
+    response_type: Optional[str] = None
+    content: Optional[str] = None
+    charts: Optional[Dict[str, Any]] = None
+    debug: Optional[Dict[str, Any]] = None
+
+class WearableDataRequest(BaseModel):
+    user_id: str
+    date: str
+    sleep_duration: Optional[float] = None
+    deep_sleep: Optional[float] = None
+    rem_sleep: Optional[float] = None
+    light_sleep: Optional[float] = None
+    awake_time: Optional[float] = None
+    heart_rate: Optional[List[int]] = None
+    movement: Optional[List[float]] = None
+    respiration: Optional[List[float]] = None
+
+class KnowledgeDocumentRequest(BaseModel):
+    documents: List[Dict[str, str]]  # List of {content: str, source: str}
 
 class HealthResponse(BaseModel):
     status: str
     database_connected: bool
     llm_available: bool
+    sleep_coach_initialized: bool
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize connections on startup"""
-    logger.info("Starting up application...")
-    db.connect()
+    """Initialize Sleep Coach LLM system on startup"""
+    global sleep_coach
+    logger.info("Starting up Sleep Coach LLM service...")
+    try:
+        # Validate configuration
+        Config.validate()
+        
+        # Initialize Sleep Coach LLM
+        sleep_coach = SleepCoachLLM()
+        logger.info("Sleep Coach LLM system initialized successfully")
+        
+        # Optionally add some default knowledge documents
+        try:
+            sleep_coach.add_knowledge_documents([
+                {
+                    "content": "Adults need 7-9 hours of sleep per night for optimal health.",
+                    "source": "National Sleep Foundation"
+                },
+                {
+                    "content": "Deep sleep is crucial for physical recovery and immune function.",
+                    "source": "Journal of Sleep Research"
+                },
+                {
+                    "content": "REM sleep plays a vital role in memory consolidation and emotional processing.",
+                    "source": "Neuroscience & Biobehavioral Reviews"
+                }
+            ])
+        except Exception as e:
+            logger.warning(f"Could not add default knowledge documents: {e}")
+            
+    except Exception as e:
+        logger.error(f"Error initializing Sleep Coach LLM: {e}")
+        sleep_coach = None
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Clean up connections on shutdown"""
-    logger.info("Shutting down application...")
-    db.disconnect()
+    """Clean up on shutdown"""
+    logger.info("Shutting down Sleep Coach LLM service...")
+    global sleep_coach
+    if sleep_coach and sleep_coach.analytics_db.connection:
+        sleep_coach.analytics_db.connection.close()
+        logger.info("Database connection closed")
 
 @app.get("/", tags=["General"])
 async def root():
     """Root endpoint"""
     return {
-        "message": "AI Sleep Coach Database Query Service",
-        "version": "1.0.0",
+        "message": "Sleep Coach LLM API",
+        "version": "2.0.0",
+        "description": "AI-powered Sleep Coach service",
         "endpoints": {
             "/health": "Health check",
-            "/query": "Query the database with natural language",
-            "/schema": "Get database schema",
+            "/query": "Ask questions about sleep data",
+            "/wearable": "Submit wearable sleep data",
+            "/knowledge": "Add knowledge documents to vector DB",
             "/stats": "Get database statistics"
         }
     }
@@ -227,115 +140,154 @@ async def root():
 @app.get("/health", response_model=HealthResponse, tags=["General"])
 async def health_check():
     """Health check endpoint"""
-    db_connected = db.connection and db.connection.is_connected()
+    global sleep_coach
     
+    db_connected = False
     llm_available = False
-    try:
-        result = llm_client.generate("test", stream=False)
-        llm_available = True
-    except Exception as e:
-        logger.warning(f"LLM health check failed: {e}")
     
-    status = "healthy" if (db_connected and llm_available) else "degraded"
+    if sleep_coach:
+        db_connected = sleep_coach.analytics_db.connection is not None and sleep_coach.analytics_db.connection.is_connected()
+        # Test LLM by checking if agent is initialized
+        llm_available = sleep_coach.agent.llm is not None
+    
+    sleep_coach_initialized = sleep_coach is not None
+    
+    status = "healthy" if (db_connected and llm_available and sleep_coach_initialized) else "degraded"
     
     return HealthResponse(
         status=status,
         database_connected=db_connected,
-        llm_available=llm_available
+        llm_available=llm_available,
+        sleep_coach_initialized=sleep_coach_initialized
     )
 
-@app.get("/schema", tags=["Database"])
-async def get_schema(table_name: str = "ai_coach_modules_summary"):
-    """Get database schema for a table"""
+@app.post("/query", response_model=QueryResponse, tags=["Sleep Coach"])
+async def handle_query(request: QueryRequest):
+    """
+    Handle user query about sleep data
+    
+    Examples:
+    - "How was my sleep over the last 7 days?"
+    - "What's my average sleep duration?"
+    - "How does my deep sleep compare to others?"
+    - "What's the importance of REM sleep?"
+    """
+    global sleep_coach
+    
+    if not sleep_coach:
+        raise HTTPException(status_code=503, detail="Sleep Coach LLM system not initialized")
+    
     try:
-        schema = db.get_table_schema(table_name)
-        return {"table_name": table_name, "schema": schema}
-    except Exception as e:
-        logger.error(f"Error getting schema: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/stats", tags=["Database"])
-async def get_stats(table_name: str = "ai_coach_modules_summary"):
-    """Get database statistics"""
-    try:
-        stats = db.get_table_stats(table_name)
-        return stats
-    except Exception as e:
-        logger.error(f"Error getting stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/sample", tags=["Database"])
-async def get_sample(table_name: str = "ai_coach_modules_summary", limit: int = 5):
-    """Get sample rows from a table"""
-    try:
-        sample = db.get_table_sample(table_name, limit)
-        return {"table_name": table_name, "sample_data": sample, "limit": limit}
-    except Exception as e:
-        logger.error(f"Error getting sample: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/query", response_model=QueryResponse, tags=["Query"])
-async def query_database(request: QueryRequest):
-    """Answer questions about the database using natural language"""
-    try:
-        logger.info(f"Processing question: {request.question}")
-        
-        # Get context information
-        schema = db.get_table_schema(request.table_name)
-        sample = db.get_table_sample(request.table_name, limit=5)
-        stats = db.get_table_stats(request.table_name)
-        
-        # Build context string
-        context_parts = [
-            f"Database: {config.MYSQL_DATABASE}",
-            f"Table: {request.table_name}",
-            f"Total Rows: {stats['row_count']}",
-            "\nTable Schema:",
-            ", ".join([col['COLUMN_NAME'] for col in schema]),
-            "\nColumn Details:",
-        ]
-        
-        for col in schema[:10]:
-            col_info = f"- {col['COLUMN_NAME']}: {col['DATA_TYPE']}"
-            if col.get('CHARACTER_MAXIMUM_LENGTH'):
-                col_info += f" (max length: {col['CHARACTER_MAXIMUM_LENGTH']})"
-            context_parts.append(col_info)
-        
-        context_parts.append("\nSample Data (first 5 rows):")
-        for i, row in enumerate(sample, 1):
-            context_parts.append(f"\nRow {i}:")
-            for key, value in list(row.items())[:10]:
-                context_parts.append(f"  {key}: {value}")
-        
-        context = "\n".join(context_parts)
-        
-        # Generate answer using LLM
-        answer = llm_client.answer_question(request.question, context)
+        logger.info(f"Processing query from user {request.user_id}: {request.query}")
+        response = sleep_coach.handle_user_query(request.user_id, request.query)
         
         return QueryResponse(
-            answer=answer,
-            context_used={
-                "table_name": request.table_name,
-                "row_count": stats['row_count'],
-                "column_count": len(schema)
-            }
+            query=request.query,
+            response_type=response.get("response_type"),
+            content=response.get("content"),
+            charts=response.get("charts"),
+            debug=response.get("debug")
         )
-    
     except Exception as e:
         logger.error(f"Error processing query: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
 
-@app.post("/query/sql", tags=["Query"])
-async def execute_sql_query(query: str):
-    """Execute a raw SQL query (only SELECT queries are allowed for safety)"""
-    if not query.strip().upper().startswith("SELECT"):
-        raise HTTPException(status_code=400, detail="Only SELECT queries are allowed")
+@app.post("/wearable", tags=["Data Ingestion"])
+async def process_wearable_data(request: WearableDataRequest):
+    """
+    Process and store wearable sleep data
+    
+    Accepts raw wearable device data and stores it in the analytics database.
+    """
+    global sleep_coach
+    
+    if not sleep_coach:
+        raise HTTPException(status_code=503, detail="Sleep Coach LLM system not initialized")
     
     try:
-        results = db.execute_query(query)
-        return {"query": query, "results": results, "row_count": len(results)}
+        logger.info(f"Processing wearable data for user {request.user_id} on {request.date}")
+        
+        # Prepare raw data dict
+        raw_data = {
+            "user_id": request.user_id,
+            "date": request.date,
+            "sleep_duration": request.sleep_duration or 0,
+            "deep_sleep": request.deep_sleep or 0,
+            "rem_sleep": request.rem_sleep or 0,
+            "light_sleep": request.light_sleep or 0,
+            "awake_time": request.awake_time or 0,
+            "heart_rate": request.heart_rate or [],
+            "movement": request.movement or [],
+            "respiration": request.respiration or []
+        }
+        
+        sleep_coach.process_wearable_data(raw_data)
+        
+        return {
+            "status": "success",
+            "message": f"Wearable data processed for user {request.user_id}",
+            "date": request.date
+        }
     except Exception as e:
-        logger.error(f"Error executing SQL: {e}")
+        logger.error(f"Error processing wearable data: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing wearable data: {str(e)}")
+
+@app.post("/knowledge", tags=["Knowledge Base"])
+async def add_knowledge_documents(request: KnowledgeDocumentRequest):
+    """
+    Add knowledge documents to the vector database
+    
+    This allows you to add sleep-related research and knowledge
+    that the LLM can reference when answering questions.
+    """
+    global sleep_coach
+    
+    if not sleep_coach:
+        raise HTTPException(status_code=503, detail="Sleep Coach LLM system not initialized")
+    
+    try:
+        logger.info(f"Adding {len(request.documents)} knowledge documents")
+        sleep_coach.add_knowledge_documents(request.documents)
+        
+        return {
+            "status": "success",
+            "message": f"Added {len(request.documents)} documents to knowledge base"
+        }
+    except Exception as e:
+        logger.error(f"Error adding knowledge documents: {e}")
+        raise HTTPException(status_code=500, detail=f"Error adding knowledge documents: {str(e)}")
+
+@app.get("/stats", tags=["Analytics"])
+async def get_database_stats():
+    """Get database statistics and customer overview"""
+    global sleep_coach
+    
+    if not sleep_coach:
+        raise HTTPException(status_code=503, detail="Sleep Coach LLM system not initialized")
+    
+    try:
+        overview = sleep_coach.analytics_db.customers_overview(limit=20)
+        return {
+            "total_customers": len(overview),
+            "customers": overview
+        }
+    except Exception as e:
+        logger.error(f"Error getting stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/trends/{user_id}", tags=["Analytics"])
+async def get_user_trends(user_id: str, days: int = 7):
+    """Get sleep trends for a specific user over specified days"""
+    global sleep_coach
+    
+    if not sleep_coach:
+        raise HTTPException(status_code=503, detail="Sleep Coach LLM system not initialized")
+    
+    try:
+        trends = sleep_coach.analytics_db.calculate_trends(user_id, days)
+        return trends
+    except Exception as e:
+        logger.error(f"Error getting trends: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
