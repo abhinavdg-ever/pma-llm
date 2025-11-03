@@ -20,11 +20,11 @@ cp env.example .env
 
 Edit `.env` with your credentials:
 ```
-MYSQL_HOST=62.72.57.99
-MYSQL_USER=aabo
-MYSQL_PASSWORD=3#hxFkBFKJ2Ph!$@
-MYSQL_DATABASE=aaboRing10Jan
-OLLAMA_API_URL=http://34.131.0.29:11434/api/generate
+MYSQL_HOST=your_mysql_host
+MYSQL_USER=your_mysql_user
+MYSQL_PASSWORD=your_mysql_password
+MYSQL_DATABASE=your_database_name
+OLLAMA_API_URL=http://your_ollama_host:11434/api/generate
 
 # Optional: For Pinecone vector database
 OPENAI_API_KEY=your_key_here
