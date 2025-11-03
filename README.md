@@ -26,9 +26,10 @@ MYSQL_PASSWORD=your_mysql_password
 MYSQL_DATABASE=your_database_name
 OLLAMA_API_URL=http://your_ollama_host:11434/api/generate
 
-# Optional: For Pinecone vector database
-OPENAI_API_KEY=your_key_here
-PINECONE_API_KEY=your_key_here
+# Optional: Only needed if using vector database (knowledge base) feature
+# Core LLM queries use Ollama (no OpenAI key needed for main functionality)
+OPENAI_API_KEY=your_openai_key_here  # For embeddings only (optional)
+PINECONE_API_KEY=your_pinecone_key_here  # For vector DB (optional)
 PINECONE_ENV=us-east-1
 PINECONE_INDEX_NAME=aabosleepcoach
 ```

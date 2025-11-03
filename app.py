@@ -292,4 +292,10 @@ async def get_user_trends(user_id: str, days: int = 7):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        reload=True,
+        reload_excludes=["venv/*", "*.pyc", "__pycache__/*", ".git/*", "*.log"]
+    )
