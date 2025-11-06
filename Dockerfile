@@ -1,4 +1,6 @@
-# Multi-stage build for React frontend
+# Multi-stage build for Sleep Coach LLM
+
+# Frontend builder stage
 FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app/frontend
@@ -6,40 +8,14 @@ WORKDIR /app/frontend
 # Copy package files first for better caching
 COPY frontend/package*.json ./
 COPY frontend/package-lock.json* ./
+
 RUN npm ci
 
-# Copy frontend source files explicitly
-COPY frontend/src ./src
-COPY frontend/public ./public
-COPY frontend/index.html ./
-COPY frontend/vite.config.ts ./
-COPY frontend/tsconfig*.json ./
-COPY frontend/tailwind.config.ts ./
-COPY frontend/postcss.config.js ./
-COPY frontend/components.json ./
-COPY frontend/eslint.config.js ./
-
-# Verify file structure and critical files exist
-RUN echo "=== Current directory ===" && \
-    pwd && \
-    echo "=== Root files ===" && \
-    ls -la && \
-    echo "=== Checking src/ directory ===" && \
-    ls -la src/ && \
-    echo "=== Checking src/lib/ ===" && \
-    ls -la src/lib/ 2>&1 && \
-    echo "=== Verifying utils.ts ===" && \
-    test -f src/lib/utils.ts && echo "✓ utils.ts exists" || (echo "✗ utils.ts MISSING!" && find . -name "utils.ts" -type f 2>/dev/null) && \
-    echo "=== Checking vite.config.ts ===" && \
-    test -f vite.config.ts && echo "✓ vite.config.ts exists" || echo "✗ vite.config.ts MISSING" && \
-    echo "=== File structure check ===" && \
-    find src -type f -name "*.ts" -o -name "*.tsx" | head -10
+# Copy all frontend files
+COPY frontend/ .
 
 # Build frontend
-RUN npm run build || (echo "=== Build failed ===" && cat vite.config.ts && ls -la src/lib/ && exit 1)
-
-# Verify dist directory was created
-RUN test -d dist && echo "✓ dist directory exists" || (echo "✗ dist directory MISSING!" && ls -la && exit 1)
+RUN npm run build
 
 # Production stage
 FROM python:3.11-slim
@@ -56,13 +32,13 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy Python requirements and install dependencies
-COPY requirements.txt .
+COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy Python backend files
-COPY app.py .
-COPY sleep_coach_llm.py .
+COPY app.py ./
+COPY sleep_coach_llm.py ./
 
 # Copy built frontend from previous stage
 COPY --from=frontend-builder /app/frontend/dist /var/www/html
@@ -106,6 +82,9 @@ RUN mkdir -p logs
 # Create startup script
 COPY docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
+
+# Note: nginx needs to run as root to bind to ports, so we keep root user
+# The FastAPI process runs as root but this is acceptable for containerized apps
 
 # Expose port (matches docker-compose.yml mapping 8015:8000)
 EXPOSE 8000
