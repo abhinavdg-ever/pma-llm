@@ -46,6 +46,7 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     curl \
     nginx \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -83,6 +84,9 @@ RUN echo 'server { \
         proxy_set_header X-Real-IP $remote_addr; \
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
         proxy_set_header X-Forwarded-Proto $scheme; \
+        proxy_connect_timeout 60s; \
+        proxy_send_timeout 60s; \
+        proxy_read_timeout 60s; \
     } \
     \
     # Also proxy non-/api routes that are API endpoints (for backward compatibility) \
