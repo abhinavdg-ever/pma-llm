@@ -1,11 +1,12 @@
 version: '3.8'
 
 services:
-  sleep-coach:
+  ai-query-service:
     build: .
-    container_name: ai-sleep-coach
+    container_name: ai-sleep-coach-query
     ports:
-      - "8015:80"
+      - "8015:80"   # Changed from 8000 (already used by ocr-map-script)
+    restart: always
     environment:
       - MYSQL_HOST=${MYSQL_HOST}
       - MYSQL_USER=${MYSQL_USER}
@@ -18,10 +19,9 @@ services:
       - EMBEDDING_API_URL=${EMBEDDING_API_URL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     env_file:
-      - .env
-    restart: unless-stopped
+      - .env   # Load password from .env file to avoid quote issues
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]  
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -2,11 +2,18 @@
 FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app/frontend
+
+# Copy package files first for better caching
 COPY frontend/package*.json ./
 COPY frontend/package-lock.json* ./
 RUN npm ci
 
+# Copy all frontend files (including src/lib/utils.ts)
 COPY frontend/ .
+
+# Verify utils.ts exists before build
+RUN ls -la src/lib/ || echo "Warning: src/lib directory not found"
+
 RUN npm run build
 
 # Production stage
