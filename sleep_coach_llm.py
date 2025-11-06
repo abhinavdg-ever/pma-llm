@@ -520,6 +520,15 @@ class LlamaClient:
             else:
                 print(f"Llama API error: {response.status_code} - {response.text}")
                 return f"[API ERROR] Trouble connecting to Llama service. Status: {response.status_code}"
+        except requests.exceptions.ConnectTimeout as e:
+            print(f"Error calling Llama API: Connection timeout - {e}")
+            return f"[ERROR] Connection timeout: Unable to connect to Llama API at {self.api_url}. The service may be down or unreachable."
+        except requests.exceptions.ConnectionError as e:
+            print(f"Error calling Llama API: Connection error - {e}")
+            return f"[ERROR] Connection error: Unable to connect to Llama API at {self.api_url}. The service may be down or unreachable."
+        except requests.exceptions.Timeout as e:
+            print(f"Error calling Llama API: Request timeout - {e}")
+            return f"[ERROR] Request timeout: The Llama API took too long to respond."
         except Exception as e:
             print(f"Error calling Llama API: {e}")
             return f"[ERROR] I encountered an error while processing your request: {str(e)}"
@@ -671,15 +680,18 @@ Columns: {', '.join(summary_cols)}
 - VO2MaxClassification: VO2 Max classification (Excellent/Good/Average/Fair/Training in Progress)
 
 CRITICAL RULES:
-- Date format: Use STR_TO_DATE(date, '%d/%m/%y') for date column
+- Date column is VARCHAR in format 'dd/mm/yy' - DO NOT use STR_TO_DATE conversion
+- Date comparisons: Convert comparison date to VARCHAR format using DATE_FORMAT (e.g., date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 15 DAY), '%d/%m/%y'))
+- Date in SELECT: Use date AS date (no conversion, already readable)
 - BMI: Calculate as weight / POWER(height/100, 2) AS bmi (NOT stored)
-- GROUP BY: Required when SELECT includes date AND aggregates (AVG/SUM/COUNT/etc)
+- GROUP BY: Required when SELECT includes date AND aggregates (AVG/SUM/COUNT/etc). Use: date (no conversion)
 - Table aliases: Use consistently (s for summary, d for details) or omit if no JOIN
 - JOIN: Both tables use customer_id for relationship
 
 Examples:
 - Profile: SELECT chronotypeName, insomniaScore, VO2Max AS vo2_max, weight/POWER(height/100,2) AS bmi FROM {self.analytics_db.summary_table} WHERE customer_id='user123'
-- Trends: SELECT STR_TO_DATE(date,'%d/%m/%y') AS date, AVG(netDuration) FROM {self.analytics_db.details_table} WHERE customer_id='user123' GROUP BY STR_TO_DATE(date,'%d/%m/%y') ORDER BY date DESC
+- Trends: SELECT date, AVG(netDuration) FROM {self.analytics_db.details_table} WHERE customer_id='user123' GROUP BY date ORDER BY date DESC
+- Date filter: SELECT date, AVG(remDuration) AS rem_duration FROM {self.analytics_db.details_table} WHERE customer_id='user123' AND date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 15 DAY), '%d/%m/%y') GROUP BY date ORDER BY date DESC
 - Join: SELECT d.netDuration, s.chronotypeName FROM {self.analytics_db.details_table} d JOIN {self.analytics_db.summary_table} s ON d.customer_id=s.customer_id WHERE d.customer_id='user123'"""
         return schema
     
@@ -696,10 +708,12 @@ Rules:
 2. Table choice: sleep data/trends → {self.analytics_db.details_table}; profile/risks/chronotype/BMI/VO2Max → {self.analytics_db.summary_table}; both → JOIN
 3. Use alias consistently: s.column OR no alias (never mix)
 4. Filter: customer_id = '{customer_id}' (unless query asks for all users)
-5. Date: Use STR_TO_DATE(date, '%d/%m/%y') for date column
-6. BMI: Calculate weight/POWER(height/100,2) AS bmi (not stored)
-7. GROUP BY: Required when SELECT has date AND aggregates (AVG/SUM/COUNT). Use: STR_TO_DATE(date, '%d/%m/%y')
-8. No GROUP BY if only aggregates (no date in SELECT)
+5. Date column is VARCHAR in format 'dd/mm/yy' - DO NOT use STR_TO_DATE conversion
+6. Date comparisons in WHERE: Convert comparison date to VARCHAR format using DATE_FORMAT (e.g., date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 15 DAY), '%d/%m/%y'), NOT STR_TO_DATE(date, '%d/%m/%y') >= ...)
+7. Date in SELECT: Use date AS date (no conversion needed, it's already in readable format)
+8. BMI: Calculate weight/POWER(height/100,2) AS bmi (not stored)
+9. GROUP BY: Required when SELECT has date AND aggregates (AVG/SUM/COUNT). Use: date (no conversion)
+10. No GROUP BY if only aggregates (no date in SELECT)
 
 SQL:"""
         
@@ -1322,14 +1336,27 @@ Response:"""
                 
                 try:
                     llm_response = self.llama_client.generate(prompt, timeout=60)
-                    response["response_type"] = "llm_core_query"
-                    response["content"] = llm_response
-                    response["knowledge_used"] = False
-                    response["knowledge_sources"] = []
+                    # Check if the response is an error message
+                    if llm_response.startswith("[ERROR]") or llm_response.startswith("[API ERROR]"):
+                        print(f"⚠️  Llama API error returned: {llm_response}")
+                        if is_off_topic:
+                            response["content"] = "I'm a Sleep Coach AI assistant specializing in sleep-related questions. While I'd like to help with your question, I'm experiencing some technical delays. Please try asking me something about sleep, health, or wellness!"
+                        else:
+                            response["content"] = "I apologize, but the AI service is taking longer than expected to respond. Please try again in a moment, or rephrase your question."
+                        response["response_type"] = "llm_core_query"
+                        response["knowledge_used"] = False
+                        response["knowledge_sources"] = []
+                    else:
+                        response["response_type"] = "llm_core_query"
+                        response["content"] = llm_response
+                        response["knowledge_used"] = False
+                        response["knowledge_sources"] = []
                 except Exception as e:
                     error_msg = str(e)
-                    if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
-                        print(f"⚠️  Llama API timeout during LLM Core query.")
+                    if ("timeout" in error_msg.lower() or "timed out" in error_msg.lower() or 
+                        "ConnectTimeout" in error_msg or "ConnectionError" in error_msg or
+                        "Max retries exceeded" in error_msg):
+                        print(f"⚠️  Llama API connection/timeout error during LLM Core query: {error_msg}")
                         if is_off_topic:
                             response["content"] = "I'm a Sleep Coach AI assistant specializing in sleep-related questions. While I'd like to help with your question, I'm experiencing some technical delays. Please try asking me something about sleep, health, or wellness!"
                         else:

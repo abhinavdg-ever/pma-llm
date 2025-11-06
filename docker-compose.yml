@@ -8,18 +8,23 @@ services:
       - "8015:8000"   # external:internal - nginx listens on 8000 internally
     restart: always
     environment:
-      - MYSQL_HOST=${MYSQL_HOST}
-      - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
-      - MYSQL_DATABASE=${MYSQL_DATABASE}
-      - LLAMA_API_URL=${LLAMA_API_URL}
-      - LLAMA_MODEL=${LLAMA_MODEL}
-      - QDRANT_URL=${QDRANT_URL}
-      - QDRANT_COLLECTION_NAME=${QDRANT_COLLECTION_NAME}
-      - EMBEDDING_API_URL=${EMBEDDING_API_URL}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # MySQL Configuration
+      - MYSQL_HOST=62.72.57.99
+      - MYSQL_USER=aabo
+      - MYSQL_PASSWORD=3#hxFkBFKJ2Ph!$$@
+      - MYSQL_DATABASE=aaboRing10Jan
+      # Llama Configuration
+      - LLAMA_API_URL=http://34.131.37.125:11434/api/generate
+      - LLAMA_MODEL=llama3
+      # Qdrant Configuration
+      - QDRANT_URL=http://34.131.37.125:6333
+      - QDRANT_COLLECTION_NAME=docs
+      # Embedding Service Configuration
+      - EMBEDDING_API_URL=http://34.131.37.125:8000/embed
+      # OpenAI (optional)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     env_file:
-      - .env   # Load password from .env file to avoid quote issues
+      - ./local-llm/.env   # Load MYSQL_PASSWORD and other vars from .env file
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/health"]
       interval: 30s
