@@ -13,10 +13,9 @@ RUN npm ci
 
 # Copy all frontend files
 # Build context is /apps/local-llm/, so frontend/ refers to /apps/local-llm/frontend/
-# IMPORTANT: Copy everything from frontend/ to ensure all files are included
-# But explicitly copy src/lib to ensure it's not excluded
-COPY frontend/ .
+# IMPORTANT: Copy src/lib FIRST before the main copy to ensure it's not excluded
 COPY frontend/src/lib ./src/lib
+COPY frontend/ .
 
 # Debug: Verify files were copied correctly - FAIL BUILD if utils.ts is missing
 RUN echo "=== Verifying copied files ===" && \
