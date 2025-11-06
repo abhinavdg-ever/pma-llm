@@ -54,6 +54,12 @@ class QueryResponse(BaseModel):
     content: Optional[str] = None
     charts: Optional[Dict[str, Any]] = None
     debug: Optional[Dict[str, Any]] = None
+    sql_query: Optional[str] = None
+    results: Optional[List[Dict[str, Any]]] = None
+    total_rows: Optional[int] = None
+    query_classification: Optional[str] = None
+    knowledge_sources: Optional[List[str]] = None
+    knowledge_used: Optional[bool] = None
 
 class WearableDataRequest(BaseModel):
     user_id: str
@@ -89,24 +95,8 @@ async def startup_event():
         sleep_coach = SleepCoachLLM()
         logger.info("Sleep Coach LLM system initialized successfully")
         
-        # Optionally add some default knowledge documents
-        try:
-            sleep_coach.add_knowledge_documents([
-                {
-                    "content": "Adults need 7-9 hours of sleep per night for optimal health.",
-                    "source": "National Sleep Foundation"
-                },
-                {
-                    "content": "Deep sleep is crucial for physical recovery and immune function.",
-                    "source": "Journal of Sleep Research"
-                },
-                {
-                    "content": "REM sleep plays a vital role in memory consolidation and emotional processing.",
-                    "source": "Neuroscience & Biobehavioral Reviews"
-                }
-            ])
-        except Exception as e:
-            logger.warning(f"Could not add default knowledge documents: {e}")
+        # Default knowledge documents are no longer added automatically
+        # Use the /knowledge endpoint to add documents if needed
             
     except Exception as e:
         logger.error(f"Error initializing Sleep Coach LLM: {e}")
@@ -186,7 +176,13 @@ async def handle_query(request: QueryRequest):
             response_type=response.get("response_type"),
             content=response.get("content"),
             charts=response.get("charts"),
-            debug=response.get("debug")
+            debug=response.get("debug"),
+            sql_query=response.get("sql_query"),
+            results=response.get("results"),
+            total_rows=response.get("total_rows"),
+            query_classification=response.get("query_classification"),
+            knowledge_sources=response.get("knowledge_sources"),
+            knowledge_used=response.get("knowledge_used")
         )
     except Exception as e:
         logger.error(f"Error processing query: {e}")

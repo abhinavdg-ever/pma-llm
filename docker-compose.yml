@@ -1,24 +1,28 @@
 version: '3.8'
 
 services:
-  ai-query-service:
+  sleep-coach:
     build: .
-    container_name: ai-sleep-coach-query
+    container_name: ai-sleep-coach
     ports:
-      - "8000:8000"
+      - "8000:80"
     environment:
       - MYSQL_HOST=${MYSQL_HOST}
       - MYSQL_USER=${MYSQL_USER}
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - OLLAMA_API_URL=${OLLAMA_API_URL}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_ENDPOINT=${PINECONE_ENDPOINT}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LLAMA_API_URL=${LLAMA_API_URL}
     env_file:
       - .env
     restart: unless-stopped
-    networks:
-      - app-network
-
-networks:
-  app-network:
-    driver: bridge
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 

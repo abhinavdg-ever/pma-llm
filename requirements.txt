@@ -11,3 +11,4 @@ openai
 langchain-community
 langchain-openai
 langchain-pinecone
+qdrant-client
