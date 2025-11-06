@@ -27,8 +27,11 @@ RUN echo "=== Current directory ===" && \
     echo "=== File structure check ===" && \
     find src -type f -name "*.ts" -o -name "*.tsx" | head -10
 
-# Build with verbose output
-RUN npm run build 2>&1 | head -50 || (echo "=== Build failed, checking paths ===" && cat vite.config.ts && ls -la src/lib/ && exit 1)
+# Build frontend
+RUN npm run build || (echo "=== Build failed ===" && cat vite.config.ts && ls -la src/lib/ && exit 1)
+
+# Verify dist directory was created
+RUN test -d dist && echo "✓ dist directory exists" || (echo "✗ dist directory MISSING!" && ls -la && exit 1)
 
 # Production stage
 FROM python:3.11-slim
