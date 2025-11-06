@@ -31,8 +31,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy Python backend files
 COPY app.py .
 COPY sleep_coach_llm.py .
-COPY process_pdfs_to_vector_db.py .
-COPY fix_pinecone_dimension.py .
 
 # Copy built frontend from previous stage
 COPY --from=frontend-builder /app/frontend/dist /var/www/html

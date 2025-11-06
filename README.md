@@ -15,23 +15,26 @@ pip install -r requirements.txt
 Create a `.env` file from the template:
 
 ```bash
-cp env.example .env
+cp .env.example .env
 ```
 
-Edit `.env` with your credentials:
+Edit `.env` with your credentials (copy from `.env.example`):
 ```
+# Required
 MYSQL_HOST=your_mysql_host
 MYSQL_USER=your_mysql_user
 MYSQL_PASSWORD=your_mysql_password
 MYSQL_DATABASE=your_database_name
-OLLAMA_API_URL=http://your_ollama_host:11434/api/generate
+LLAMA_API_URL=http://your_llama_host:11434/api/generate
+LLAMA_MODEL=llama3
 
-# Optional: Only needed if using vector database (knowledge base) feature
-# Core LLM queries use Ollama (no OpenAI key needed for main functionality)
-OPENAI_API_KEY=your_openai_key_here  # For embeddings only (optional)
-PINECONE_API_KEY=your_pinecone_key_here  # For vector DB (optional)
-PINECONE_ENV=us-east-1
-PINECONE_INDEX_NAME=aabosleepcoach
+# Required for knowledge base (vector search)
+QDRANT_URL=http://your_qdrant_host:6333
+QDRANT_COLLECTION_NAME=docs
+EMBEDDING_API_URL=http://your_embedding_service:8000/embed
+
+# Optional
+OPENAI_API_KEY=your_openai_key_here  # Only if using OpenAI embeddings
 ```
 
 ### 3. Run the Service
@@ -106,13 +109,16 @@ curl http://localhost:8000/trends/123?days=30
 ## Project Structure
 
 ```
-LocalLLM/
+local-llm/
 ├── app.py              # FastAPI application
 ├── sleep_coach_llm.py  # Sleep Coach LLM system
 ├── requirements.txt    # Python dependencies
 ├── Dockerfile          # Docker configuration
 ├── docker-compose.yml  # Docker Compose configuration
-├── env.example         # Environment variables template
+├── docker-entrypoint.sh # Docker startup script
+├── .env.example        # Environment variables template
+├── CODE_FLOW.md        # Code flow documentation
+├── frontend/           # React frontend application
 └── README.md          # This file
 ```
 
@@ -136,8 +142,13 @@ docker-compose restart ai-query-service
 - Check network connectivity to MySQL server
 
 ### LLM API
-- Verify Ollama is running at `http://34.131.0.29:11434`
-- Test: `curl http://34.131.0.29:11434/api/version`
+- Verify Llama/Ollama is running at the configured `LLAMA_API_URL`
+- Test: `curl http://your-llama-host:11434/api/generate`
+
+### Vector Database
+- Verify Qdrant is accessible at `QDRANT_URL`
+- Verify embedding service is accessible at `EMBEDDING_API_URL`
+- Test: `curl http://your-qdrant-host:6333/collections/docs`
 
 ### Dependencies
 - Ensure all packages are installed: `pip install -r requirements.txt`
