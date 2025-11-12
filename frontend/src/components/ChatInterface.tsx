@@ -3,7 +3,7 @@ import { useToast } from "@/components/ui/use-toast";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
 import TypingIndicator from "./TypingIndicator";
-import { Activity, Trash2 } from "lucide-react";
+import { Anchor, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 // Configurable user ID - can be set via environment variable
@@ -26,6 +26,13 @@ interface ChartData {
   format: string;
 }
 
+interface SourceEntry {
+  source: string;
+  page?: number;
+  score?: number;
+  excerpt?: string;
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
@@ -36,6 +43,9 @@ interface Message {
   total_rows?: number;
   userQuery?: string; // Store original user query for context
   query_classification?: string; // SQL or Knowledge/General
+  answer_points?: string[];
+  disclaimer?: string | null;
+  sources?: SourceEntry[];
 }
 
 const ChatInterface = () => {
@@ -81,7 +91,7 @@ const ChatInterface = () => {
       );
 
       if (!response.ok) {
-        throw new Error("Failed to get response from sleep coach");
+        throw new Error("Failed to get response from contract engine");
       }
 
       // Parse the JSON response from the API
@@ -99,14 +109,17 @@ const ChatInterface = () => {
           results: data.results || null,
           total_rows: data.total_rows || 0,
           userQuery: content, // Pass the original user query for chart detection
-          query_classification: data.query_classification || null
+          query_classification: data.query_classification || null,
+          answer_points: data.answer_points || [],
+          disclaimer: data.disclaimer ?? null,
+          sources: data.sources || []
         },
       ]);
     } catch (error) {
       console.error("Error sending message:", error);
       toast({
         title: "Error",
-        description: "Failed to get response from sleep coach. Please make sure the backend API is running on http://localhost:8000",
+        description: "Failed to get response from the contract engine. Please confirm the backend API is running on http://localhost:8000",
         variant: "destructive",
       });
     } finally {
@@ -115,17 +128,19 @@ const ChatInterface = () => {
   };
 
   return (
-    <div className="flex h-screen flex-col bg-gradient-to-b from-background to-muted/30">
+    <div className="flex h-screen flex-col bg-gradient-to-b from-[#0f172a] via-[#0b1b33] to-[#0f172a] text-foreground">
       {/* Header */}
-      <div className="border-b border-border bg-card/50 backdrop-blur-sm px-4 py-4 shadow-soft">
-        <div className="mx-auto max-w-3xl flex items-center justify-between gap-3">
+      <div className="border-b border-border bg-card/60 backdrop-blur-sm px-4 py-4 shadow-soft">
+        <div className="mx-auto flex max-w-3xl items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-primary to-secondary shadow-medium">
-              <Activity className="h-6 w-6 text-primary-foreground" />
+              <Anchor className="h-6 w-6 text-primary-foreground" />
             </div>
             <div>
-              <h1 className="text-xl font-semibold text-foreground">Sleep Coach</h1>
-              <p className="text-sm text-muted-foreground">Your AI-powered wellness companion</p>
+              <h1 className="text-xl font-semibold text-foreground">Contract Insights Engine</h1>
+              <p className="text-sm text-muted-foreground">
+                Navigate longshore agreements with maritime-grade intelligence
+              </p>
             </div>
           </div>
             <Button
@@ -148,13 +163,18 @@ const ChatInterface = () => {
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-4 px-4 py-12 text-center">
               <div className="flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-primary to-secondary shadow-medium">
-                <Activity className="h-8 w-8 text-primary-foreground" />
+                <Anchor className="h-8 w-8 text-primary-foreground" />
               </div>
               <div>
-                <h2 className="text-2xl font-semibold text-foreground">Welcome to your Sleep Coach</h2>
+                <h2 className="text-2xl font-semibold text-foreground">Welcome aboard</h2>
                 <p className="mt-2 text-muted-foreground">
-                  Ask me anything about your sleep, wellness, or sleep goals.
+                  Ask anything about ILWU/PMA contract language, interpretations, and clauses. Training set includes:
                 </p>
+                <ul className="mt-3 space-y-1 list-disc list-inside text-sm text-muted-foreground/90">
+                  <li>Pacific Coast Longshore Contract Document (2022-2028)</li>
+                  <li>Pacific Coast Walking Bosses and Foremen's Agreement (2022-2028)</li>
+                  <li>Pacific Coast Clerks Contract Document (2022-2028)</li>
+                </ul>
               </div>
             </div>
           )}
@@ -169,7 +189,10 @@ const ChatInterface = () => {
               results={message.results}
               total_rows={message.total_rows}
               userQuery={message.userQuery}
-              query_classification={message.query_classification}
+            query_classification={message.query_classification}
+            answer_points={message.answer_points}
+            disclaimer={message.disclaimer}
+            sources={message.sources}
             />
           ))}
           

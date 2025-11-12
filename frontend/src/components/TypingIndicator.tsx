@@ -2,13 +2,13 @@ import { Bot } from "lucide-react";
 import { useState, useEffect } from "react";
 
 const thinkingMessages = [
-  "Thinking...",
+  "Charting a course...",
   "Classifying your query...",
-  "Planning next moves...",
-  "Analyzing your sleep data...",
-  "Thinking longer...",
+  "Cross-referencing clauses...",
+  "Reviewing Pacific Coast agreements...",
+  "Consulting maritime precedents...",
   "Processing your request...",
-  "Gathering insights...",
+  "Gathering insights from training set...",
   "Almost there...",
 ];
 

@@ -1,7 +1,21 @@
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Bot, User } from "lucide-react";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import ReactMarkdown from 'react-markdown';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import ReactMarkdown from "react-markdown";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface ChartData {
   chart_type: string;
@@ -18,9 +32,31 @@ interface ChatMessageProps {
   total_rows?: number;
   userQuery?: string; // Original user query to detect plot requests
   query_classification?: string; // SQL or Knowledge/General
+  answer_points?: string[];
+  disclaimer?: string | null;
+  sources?: SourceEntry[] | null;
 }
 
-const ChatMessage = ({ role, content, response_type, charts, results, total_rows, userQuery, query_classification }: ChatMessageProps) => {
+interface SourceEntry {
+  source: string;
+  page?: number;
+  score?: number;
+  excerpt?: string;
+}
+
+const ChatMessage = ({
+  role,
+  content,
+  response_type,
+  charts,
+  results,
+  total_rows,
+  userQuery,
+  query_classification,
+  answer_points,
+  disclaimer,
+  sources,
+}: ChatMessageProps) => {
   // Extract average data for table display
   const getAverageData = (charts: ChartData) => {
     if (!charts?.data) return null;
@@ -139,6 +175,30 @@ const ChatMessage = ({ role, content, response_type, charts, results, total_rows
   const chartData = chartDataFromCharts || chartDataFromResults;
   
   const isUser = role === "user";
+  const hasStructuredAnswer = !isUser && !!answer_points && answer_points.length > 0;
+  const hasSources = !isUser && !!sources && sources.length > 0;
+
+  const [sourceLimit, setSourceLimit] = useState<number>(0);
+
+  useEffect(() => {
+    if (hasSources && sources) {
+      setSourceLimit((prev) => {
+        const defaultLimit = Math.min(3, Math.min(10, sources.length));
+        if (prev === 0) {
+          return defaultLimit;
+        }
+        return Math.min(prev, Math.min(10, sources.length));
+      });
+    } else {
+      setSourceLimit(0);
+    }
+  }, [hasSources, sources?.length]);
+
+  const visibleSources =
+    hasSources && sources
+      ? sources.slice(0, sourceLimit > 0 ? sourceLimit : Math.min(10, sources.length))
+      : [];
+  const maxSourceOptions = hasSources && sources ? Math.min(10, sources.length) : 0;
 
   // Custom components for markdown rendering
   const markdownComponents = {
@@ -183,15 +243,17 @@ const ChatMessage = ({ role, content, response_type, charts, results, total_rows
         {/* Show classification badge for assistant messages */}
         {!isUser && query_classification && (
           <div className="mb-2 flex items-center gap-2">
-            <span className={cn(
-              "text-xs font-medium px-2.5 py-1 rounded-full border",
-              query_classification === "Data Pull (SQL)"
-                ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800"
-                : query_classification === "Knowledge"
-                ? "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/30 dark:text-purple-400 dark:border-purple-800"
-                : "bg-green-50 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-400 dark:border-green-800"
-            )}>
-              Query classified as: {query_classification}
+            <span
+              className={cn(
+                "rounded-full border px-2.5 py-1 text-xs font-medium tracking-wide",
+                query_classification === "Contract Knowledge"
+                  ? "border-emerald-300/40 bg-emerald-300/20 text-emerald-100"
+                  : query_classification === "General Knowledge"
+                  ? "border-cyan-300/40 bg-cyan-300/20 text-cyan-100"
+                  : "border-rose-300/40 bg-rose-300/20 text-rose-100"
+              )}
+            >
+              Intent: {query_classification}
             </span>
           </div>
         )}
@@ -202,16 +264,92 @@ const ChatMessage = ({ role, content, response_type, charts, results, total_rows
         )}>
           {isUser ? (
             <p className="whitespace-pre-wrap">{content}</p>
+          ) : hasStructuredAnswer ? (
+            <div className="space-y-4">
+              <div>
+                <h4 className="text-sm font-semibold uppercase tracking-wide text-foreground">Answer</h4>
+                <ul className="mt-2 space-y-2 text-foreground">
+                  {answer_points?.map((point, idx) => (
+                    <li key={idx} className="flex gap-2">
+                      <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-primary" />
+                      <span className="flex-1">{point}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              {disclaimer && (
+                <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+                  <strong className="font-semibold text-foreground">Disclaimer:</strong> {disclaimer}
+                </div>
+              )}
+            </div>
           ) : (
             <ReactMarkdown components={markdownComponents}>
               {content}
             </ReactMarkdown>
           )}
         </div>
+
+        {!hasStructuredAnswer && !isUser && disclaimer && (
+          <div className="mt-4 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+            <strong className="font-semibold text-foreground">Disclaimer:</strong> {disclaimer}
+          </div>
+        )}
+
+        {!isUser && hasSources && visibleSources.length > 0 && (
+          <div className="mt-4 rounded-lg border border-border bg-background/50 p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <h4 className="text-sm font-semibold uppercase tracking-wide text-foreground">Sources</h4>
+              {maxSourceOptions > 1 && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span>Show</span>
+                  <Select
+                    value={String(sourceLimit || Math.min(3, maxSourceOptions))}
+                    onValueChange={(value) => setSourceLimit(Number(value))}
+                  >
+                    <SelectTrigger className="h-8 w-[100px] border-border bg-card">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Array.from({ length: maxSourceOptions }, (_, idx) => idx + 1).map((count) => (
+                        <SelectItem key={count} value={String(count)}>
+                          {count}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <span>of {sources?.length}</span>
+                </div>
+              )}
+            </div>
+            <Accordion type="multiple" className="w-full">
+              {visibleSources.map((entry, idx) => (
+                <AccordionItem key={`${entry.source}-${idx}`} value={`source-${idx}`}>
+                  <AccordionTrigger className="text-left text-sm font-medium text-foreground">
+                    <span className="flex flex-col items-start">
+                      <span>{`#${idx + 1} ${entry.source || "Unknown source"}`}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {entry.page !== undefined ? `Page ${entry.page}` : "Page n/a"}
+                        {entry.score !== undefined ? ` • Score ${entry.score.toFixed(4)}` : ""}
+                      </span>
+                    </span>
+                  </AccordionTrigger>
+                  <AccordionContent className="text-sm text-muted-foreground">
+                    {entry.excerpt ? (
+                      <p className="whitespace-pre-wrap leading-relaxed">{entry.excerpt}</p>
+                    ) : (
+                      <p>No excerpt available from this source.</p>
+                    )}
+                  </AccordionContent>
+                </AccordionItem>
+              ))}
+            </Accordion>
+          </div>
+        )}
         
         {averageData && (
-          <div className="mt-4 p-4 bg-background/50 rounded-lg border border-border">
-            <h4 className="text-sm font-semibold mb-3 text-foreground">Summary Statistics</h4>
+          <div className="mt-4 rounded-lg border border-border bg-background/50 p-4">
+            <h4 className="mb-3 text-sm font-semibold uppercase tracking-wide text-foreground">Summary Highlights</h4>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -238,7 +376,7 @@ const ChatMessage = ({ role, content, response_type, charts, results, total_rows
         
         {/* Display SQL query results as table */}
         {results && results.length > 0 && response_type === "sql_query" && (
-          <div className="mt-4 p-4 bg-background/50 rounded-lg border border-border">
+          <div className="mt-4 rounded-lg border border-border bg-background/50 p-4">
             <h4 className="text-sm font-semibold mb-3 text-foreground">
               Query Results {total_rows && total_rows > 10 ? `(Showing top 10 of ${total_rows} rows)` : `(${results.length} rows)`}
             </h4>
@@ -284,8 +422,8 @@ const ChatMessage = ({ role, content, response_type, charts, results, total_rows
 
         {/* Display charts when requested or available */}
         {chartData && chartData.length > 0 && (
-          <div className="mt-4 p-4 bg-background/50 rounded-lg border border-border">
-            <h4 className="text-sm font-semibold mb-3 text-foreground">Sleep Trends</h4>
+          <div className="mt-4 rounded-lg border border-border bg-background/50 p-4">
+            <h4 className="text-sm font-semibold mb-3 text-foreground">Contract Activity Trends</h4>
             <ResponsiveContainer width="100%" height={300}>
               <LineChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
@@ -317,11 +455,11 @@ const ChatMessage = ({ role, content, response_type, charts, results, total_rows
                   .map((key, index) => {
                     const colors = [
                       'hsl(var(--primary))',
-                      'hsl(210, 100%, 60%)',
-                      'hsl(280, 70%, 60%)',
-                      'hsl(30, 100%, 60%)',
-                      'hsl(160, 70%, 50%)',
-                      'hsl(350, 80%, 60%)'
+                      'hsl(207, 88%, 62%)',
+                      'hsl(187, 70%, 55%)',
+                      'hsl(166, 60%, 48%)',
+                      'hsl(222, 70%, 65%)',
+                      'hsl(200, 80%, 58%)'
                     ];
                     return (
                       <Line 

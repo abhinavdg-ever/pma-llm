@@ -8,41 +8,41 @@ All colors MUST be HSL.
 
 @layer base {
   :root {
-    --background: 210 40% 98%;
-    --foreground: 215 25% 20%;
+    --background: 220 65% 8%;
+    --foreground: 207 65% 96%;
 
-    --card: 0 0% 100%;
-    --card-foreground: 215 25% 20%;
+    --card: 219 50% 13%;
+    --card-foreground: 207 65% 96%;
 
-    --popover: 0 0% 100%;
-    --popover-foreground: 215 25% 20%;
+    --popover: 219 50% 12%;
+    --popover-foreground: 207 65% 96%;
 
-    --primary: 195 85% 45%;
+    --primary: 200 85% 45%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 175 70% 55%;
+    --secondary: 170 63% 48%;
     --secondary-foreground: 0 0% 100%;
 
-    --muted: 210 30% 96%;
-    --muted-foreground: 215 15% 50%;
+    --muted: 217 48% 18%;
+    --muted-foreground: 204 22% 72%;
 
-    --accent: 175 70% 55%;
+    --accent: 191 90% 45%;
     --accent-foreground: 0 0% 100%;
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 210 30% 90%;
-    --input: 210 30% 90%;
-    --ring: 195 85% 45%;
+    --border: 218 42% 24%;
+    --input: 218 42% 24%;
+    --ring: 200 85% 45%;
 
     --radius: 1rem;
     
-    /* Health Coach Theme */
-    --gradient-health: linear-gradient(135deg, hsl(195 85% 45%), hsl(175 70% 55%));
-    --gradient-subtle: linear-gradient(180deg, hsl(210 40% 98%), hsl(210 30% 96%));
-    --shadow-soft: 0 2px 8px hsla(195, 85%, 45%, 0.08);
-    --shadow-medium: 0 4px 16px hsla(195, 85%, 45%, 0.12);
+    /* Maritime Theme */
+    --gradient-health: linear-gradient(135deg, hsl(202 92% 52%), hsl(170 63% 48%));
+    --gradient-subtle: linear-gradient(180deg, hsl(215 70% 10%), hsl(215 50% 12%));
+    --shadow-soft: 0 2px 12px hsla(210, 60%, 20%, 0.25);
+    --shadow-medium: 0 4px 20px hsla(200, 70%, 25%, 0.35);
     --animation-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 
     --sidebar-background: 0 0% 98%;
@@ -63,38 +63,38 @@ All colors MUST be HSL.
   }
 
   .dark {
-    --background: 215 25% 12%;
-    --foreground: 210 30% 96%;
+    --background: 217 70% 5%;
+    --foreground: 206 64% 94%;
 
-    --card: 215 20% 15%;
-    --card-foreground: 210 30% 96%;
+    --card: 218 50% 12%;
+    --card-foreground: 206 64% 94%;
 
-    --popover: 215 20% 15%;
-    --popover-foreground: 210 30% 96%;
+    --popover: 218 50% 12%;
+    --popover-foreground: 206 64% 94%;
 
-    --primary: 195 85% 55%;
+    --primary: 200 90% 50%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 175 70% 45%;
+    --secondary: 170 63% 46%;
     --secondary-foreground: 0 0% 100%;
 
-    --muted: 215 20% 20%;
-    --muted-foreground: 215 15% 65%;
+    --muted: 218 42% 18%;
+    --muted-foreground: 204 20% 70%;
 
-    --accent: 175 70% 45%;
+    --accent: 191 90% 46%;
     --accent-foreground: 0 0% 100%;
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 215 20% 20%;
-    --input: 215 20% 20%;
-    --ring: 195 85% 55%;
+    --border: 218 38% 20%;
+    --input: 218 38% 20%;
+    --ring: 200 90% 50%;
     
-    --gradient-health: linear-gradient(135deg, hsl(195 85% 55%), hsl(175 70% 45%));
-    --gradient-subtle: linear-gradient(180deg, hsl(215 25% 12%), hsl(215 20% 15%));
-    --shadow-soft: 0 2px 8px hsla(195, 85%, 55%, 0.15);
-    --shadow-medium: 0 4px 16px hsla(195, 85%, 55%, 0.2);
+    --gradient-health: linear-gradient(135deg, hsl(202 92% 52%), hsl(171 63% 46%));
+    --gradient-subtle: linear-gradient(180deg, hsl(217 70% 5%), hsl(218 50% 12%));
+    --shadow-soft: 0 2px 12px hsla(210, 60%, 20%, 0.25);
+    --shadow-medium: 0 4px 20px hsla(200, 70%, 25%, 0.35);
     --sidebar-background: 240 5.9% 10%;
     --sidebar-foreground: 240 4.8% 95.9%;
     --sidebar-primary: 224.3 76.3% 48%;

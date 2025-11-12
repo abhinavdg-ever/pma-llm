@@ -32,7 +32,7 @@ const ChatInput = ({ onSend, disabled }: ChatInputProps) => {
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask your sleep coach anything..."
+          placeholder="Ask about specific clauses, obligations, or benefits within the Pacific Coast contracts..."
           disabled={disabled}
           className="min-h-[60px] resize-none rounded-2xl border-border bg-background shadow-soft focus-visible:ring-primary"
         />
