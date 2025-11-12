@@ -23,6 +23,16 @@ interface ChartData {
   format: string;
 }
 
+interface SourceEntry {
+  source: string;
+  page?: number;
+  score?: number;
+  excerpt?: string;
+  section_heading?: string;
+  clause?: string;
+  clause_heading?: string;
+}
+
 interface ChatMessageProps {
   role: "user" | "assistant";
   content: string;
@@ -35,13 +45,7 @@ interface ChatMessageProps {
   answer_points?: string[];
   disclaimer?: string | null;
   sources?: SourceEntry[] | null;
-}
-
-interface SourceEntry {
-  source: string;
-  page?: number;
-  score?: number;
-  excerpt?: string;
+  opening?: string | null;
 }
 
 const ChatMessage = ({
@@ -56,6 +60,7 @@ const ChatMessage = ({
   answer_points,
   disclaimer,
   sources,
+  opening,
 }: ChatMessageProps) => {
   // Extract average data for table display
   const getAverageData = (charts: ChartData) => {
@@ -246,11 +251,11 @@ const ChatMessage = ({
             <span
               className={cn(
                 "rounded-full border px-2.5 py-1 text-xs font-medium tracking-wide",
-                query_classification === "Contract Knowledge"
-                  ? "border-emerald-300/40 bg-emerald-300/20 text-emerald-100"
+                query_classification?.startsWith("Contract Knowledge")
+                  ? "border-emerald-300/50 bg-emerald-500 text-white shadow-[0_0_0_1px_rgba(16,185,129,0.3)]"
                   : query_classification === "General Knowledge"
-                  ? "border-cyan-300/40 bg-cyan-300/20 text-cyan-100"
-                  : "border-rose-300/40 bg-rose-300/20 text-rose-100"
+                  ? "border-slate-900/70 bg-slate-900 text-slate-100 shadow-[0_0_0_1px_rgba(15,23,42,0.4)]"
+                  : "border-rose-300/50 bg-rose-500 text-white shadow-[0_0_0_1px_rgba(244,63,94,0.3)]"
               )}
             >
               Intent: {query_classification}
@@ -266,17 +271,19 @@ const ChatMessage = ({
             <p className="whitespace-pre-wrap">{content}</p>
           ) : hasStructuredAnswer ? (
             <div className="space-y-4">
-              <div>
-                <h4 className="text-sm font-semibold uppercase tracking-wide text-foreground">Answer</h4>
-                <ul className="mt-2 space-y-2 text-foreground">
-                  {answer_points?.map((point, idx) => (
-                    <li key={idx} className="flex gap-2">
-                      <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-primary" />
-                      <span className="flex-1">{point}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              {opening && (
+                <p className="text-sm font-semibold text-foreground leading-relaxed">
+                  {opening}
+                </p>
+              )}
+              <ul className="mt-2 space-y-2 text-foreground">
+                {answer_points?.map((point, idx) => (
+                  <li key={idx} className="flex gap-2">
+                    <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-primary" />
+                    <span className="flex-1">{point}</span>
+                  </li>
+                ))}
+              </ul>
               {disclaimer && (
                 <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
                   <strong className="font-semibold text-foreground">Disclaimer:</strong> {disclaimer}
@@ -329,8 +336,12 @@ const ChatMessage = ({
                     <span className="flex flex-col items-start">
                       <span>{`#${idx + 1} ${entry.source || "Unknown source"}`}</span>
                       <span className="text-xs text-muted-foreground">
-                        {entry.page !== undefined ? `Page ${entry.page}` : "Page n/a"}
-                        {entry.score !== undefined ? ` • Score ${entry.score.toFixed(4)}` : ""}
+                        {entry.clause && entry.clause !== "intro"
+                          ? `${entry.clause}${
+                              entry.clause_heading ? ` – ${entry.clause_heading}` : ""
+                            }`
+                          : entry.section_heading || "Section unavailable"}
+                        {entry.score !== undefined ? ` • Similarity ${entry.score.toFixed(4)}` : ""}
                       </span>
                     </span>
                   </AccordionTrigger>

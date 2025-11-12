@@ -1,9 +1,14 @@
+import logging
 import os
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+SECTION_REF_REGEX = re.compile(r"(section\s+\d+[A-Za-z0-9\-\.]*)", re.IGNORECASE)
+ARTICLE_REF_REGEX = re.compile(r"(article\s+\d+[A-Za-z0-9\-\.]*)", re.IGNORECASE)
+APPENDIX_REF_REGEX = re.compile(r"(appendix\s+[A-Za-z0-9]+)", re.IGNORECASE)
 
 
 class Config:
@@ -100,18 +105,32 @@ class VectorDatabase:
         self.collection = collection
         self.embedder = embedder
         self.client = None
+        self.Filter = None
+        self.FieldCondition = None
+        self.MatchValue = None
 
         try:
             from qdrant_client import QdrantClient
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
 
             self.client = QdrantClient(url=qdrant_url)
             self.client.get_collection(collection)  # Raises if missing.
+            self.Filter = Filter
+            self.FieldCondition = FieldCondition
+            self.MatchValue = MatchValue
         except Exception as exc:  # pragma: no cover - graceful degradation.
             print(f"[VectorDatabase] Falling back to mock search: {exc}")
             self.client = None
+            self.Filter = None
+            self.FieldCondition = None
+            self.MatchValue = None
 
     def similarity_search(
-        self, query: str, limit: int = 5, collection_override: Optional[str] = None
+        self,
+        query: str,
+        limit: int = 5,
+        collection_override: Optional[str] = None,
+        filter_conditions: Optional[List[Any]] = None,
     ) -> List[Dict[str, Any]]:
         if not self.client:
             return [
@@ -124,11 +143,23 @@ class VectorDatabase:
             ]
 
         query_vector = self.embedder.embed(query)
-        results = self.client.search(
-            collection_name=collection_override or self.collection,
-            query_vector=query_vector,
-            limit=limit,
-        )
+        search_filter = None
+        if filter_conditions and self.Filter:
+            try:
+                search_filter = self.Filter(must=[cond for cond in filter_conditions if cond])
+            except Exception:
+                search_filter = None
+
+        search_kwargs = {
+            "collection_name": collection_override or self.collection,
+            "query_vector": query_vector,
+            "limit": limit,
+        }
+
+        if search_filter is not None:
+            search_kwargs["query_filter"] = search_filter
+
+        results = self.client.search(**search_kwargs)
 
         formatted: List[Dict[str, Any]] = []
         for point in results:
@@ -143,6 +174,16 @@ class VectorDatabase:
                 }
             )
         return formatted
+
+    def make_match_condition(self, key: str, value: Optional[str]):
+        if value is None or not value.strip():
+            return None
+        if not self.FieldCondition or not self.MatchValue:
+            return None
+        try:
+            return self.FieldCondition(key=key, match=self.MatchValue(value=value))
+        except Exception:
+            return None
 
 
 class QueryClassifier:
@@ -207,23 +248,52 @@ class ContractInsightsEngine:
         self.vector_db = VectorDatabase(Config.QDRANT_URL, Config.QDRANT_COLLECTION, self.embedder)
         self.llama = LlamaClient(Config.LLAMA_API_URL, Config.LLAMA_MODEL)
         self.classifier = QueryClassifier(self.llama)
+        self.logger = logging.getLogger("contract-insights-engine")
 
     def handle_query(self, query: str, top_k: int = 3) -> Dict[str, Any]:
         classification = self.classifier.classify(query)
+        debug_info: Dict[str, Any] = {
+            "query": query,
+            "initial_classification": classification,
+        }
+        self.logger.info("Query received | classification=%s | query=%s", classification, query)
 
         if classification == "contract_knowledge":
-            if any(term in query.lower() for term in ["walking boss", "foremen", "foreman"]):
-                collection = os.getenv("QDRANT_COLLECTION_FOREMEN", "contracts_walking_bosses")
-                payload = self._answer_with_contract_knowledge(query, top_k, collection_name=collection)
-            elif any(term in query.lower() for term in ["clerk", "clerks"]):
-                collection = os.getenv("QDRANT_COLLECTION_CLERKS", "contracts_clerks")
-                payload = self._answer_with_contract_knowledge(query, top_k, collection_name=collection)
-            else:
-                payload = self._answer_with_contract_knowledge(query, top_k)
+            doc_type = self._infer_doc_type(query)
+            filter_conditions: List[Any] = []
+
+            doc_type_condition = self.vector_db.make_match_condition("doc_type", doc_type)
+            if doc_type_condition:
+                filter_conditions.append(doc_type_condition)
+
+            section_slug = self._extract_section_reference(query)
+            if section_slug:
+                section_condition = self.vector_db.make_match_condition("section_slug", section_slug)
+                if section_condition:
+                    filter_conditions.append(section_condition)
+
+            self.logger.info(
+                "Contract query routed | doc_type=%s | section_slug=%s",
+                doc_type,
+                section_slug or "none",
+            )
+            debug_info["doc_type"] = doc_type
+            if section_slug:
+                debug_info["section_slug"] = section_slug
+
+            payload = self._answer_with_contract_knowledge(
+                query,
+                top_k,
+                doc_type=doc_type,
+                filter_conditions=filter_conditions or None,
+                debug_info=debug_info,
+            )
         elif classification == "generic_knowledge":
             payload = self._answer_with_generic_llm(query)
+            debug_info["doc_type"] = "n/a"
         else:
             payload = self._answer_off_topic(query)
+            debug_info["doc_type"] = "n/a"
 
         payload.setdefault("answer_points", [])
         payload.setdefault("disclaimer", None)
@@ -237,14 +307,43 @@ class ContractInsightsEngine:
             "generic_knowledge": "General Knowledge",
             "off_topic": "Off-Topic",
         }
-        payload["query_classification"] = label_map.get(classification, classification)
+        if classification == "contract_knowledge":
+            doc_type = payload.get("doc_type") or self._infer_doc_type(query)
+            type_label_map = {
+                "longshore": "Longshore",
+                "clerks": "Clerks",
+                "walking_bosses": "Walking Bosses",
+            }
+            doc_label = type_label_map.get(doc_type, doc_type.title())
+            payload["query_classification"] = f"Contract Knowledge · {doc_label}"
+            payload["doc_type"] = doc_type
+            debug_info["doc_type"] = doc_type
+        else:
+            payload["query_classification"] = label_map.get(classification, classification)
+        payload["debug"] = debug_info
         return payload
 
     def _answer_with_contract_knowledge(
-        self, query: str, top_k: int, collection_name: Optional[str] = None
+        self,
+        query: str,
+        top_k: int,
+        doc_type: Optional[str] = None,
+        collection_name: Optional[str] = None,
+        filter_conditions: Optional[List[Any]] = None,
+        debug_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        matches = self.vector_db.similarity_search(query, limit=top_k, collection_override=collection_name)
+        matches = self.vector_db.similarity_search(
+            query,
+            limit=top_k,
+            collection_override=collection_name,
+            filter_conditions=filter_conditions,
+        )
+        matches = matches[:top_k]
         if not matches:
+            doc_type_label = doc_type or (debug_info.get("doc_type") if debug_info else "longshore")
+            if debug_info is not None:
+                debug_info["retrieved_sources"] = []
+                debug_info["note"] = "No matches from vector search"
             return {
                 "response_type": "contract_knowledge",
                 "content": "No relevant contract passages were located in the indexed agreements.",
@@ -253,20 +352,44 @@ class ContractInsightsEngine:
                 "sources": [],
                 "matches": [],
                 "total_matches": 0,
+                "opening": self._craft_opening_text(query, doc_type_label),
+                "doc_type": doc_type_label,
             }
 
         sources = self._build_source_entries(matches)
         answer_points, disclaimer = self._synthesize_contract_answer(query, matches, sources)
         content = self._assemble_contract_content(answer_points, disclaimer, sources)
 
+        if debug_info is not None:
+            debug_info["retrieved_sources"] = [
+                {
+                    "source": src.get("source"),
+                    "section_heading": src.get("section_heading"),
+                    "clause": src.get("clause"),
+                    "page": src.get("page"),
+                    "score": src.get("score"),
+                }
+                for src in sources[: top_k]
+            ]
+            self.logger.info(
+                "Vector matches | count=%d | details=%s",
+                len(debug_info["retrieved_sources"]),
+                debug_info["retrieved_sources"],
+            )
+
+        doc_type_for_opening = doc_type or (debug_info.get("doc_type") if debug_info else "longshore")
+        opening_text = self._craft_opening_text(query, doc_type_for_opening)
+
         return {
             "response_type": "contract_knowledge",
             "content": content,
             "answer_points": answer_points,
             "disclaimer": disclaimer,
-            "sources": sources,
+            "sources": sources[:3],
             "matches": matches,
             "total_matches": len(matches),
+            "opening": opening_text,
+            "doc_type": doc_type_for_opening,
         }
 
     def _build_source_entries(self, matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -274,12 +397,20 @@ class ContractInsightsEngine:
         for match in matches:
             metadata = match.get("metadata") or {}
             page = metadata.get("page") or metadata.get("page_number")
+            section_heading = metadata.get("section_heading")
+            clause_id = metadata.get("clause")
+            clause_heading = metadata.get("clause_heading")
+            chunk_type = metadata.get("chunk_type")
             entries.append(
                 {
                     "source": match.get("source", "unknown"),
                     "page": page,
                     "score": match.get("score"),
                     "excerpt": match.get("content", "").strip(),
+                    "section_heading": section_heading,
+                    "clause": clause_id,
+                    "clause_heading": clause_heading,
+                    "chunk_type": chunk_type,
                 }
             )
         return entries
@@ -296,7 +427,7 @@ class ContractInsightsEngine:
 
         if self.llama.available():
             context_snippets = "\n\n".join(
-                f"Source: {self._format_source_label(src)}\nClause: {src.get('excerpt', '')}"
+                f"Source: {self._format_source_label(src)}\nClause: {src.get('excerpt', '')[:800]}"
                 for src in sources
             )
             prompt = (
@@ -316,9 +447,9 @@ class ContractInsightsEngine:
             )
             try:
                 raw_response = self.llama.generate(prompt, stream=True)
-                json_block = self._extract_json(raw_response)
-                if json_block:
-                    data = json.loads(json_block)
+                json_payload = self._parse_llama_json(raw_response)
+                if json_payload:
+                    data = json_payload
                     answer_points = [
                         point.strip() for point in data.get("answer", []) if isinstance(point, str)
                     ]
@@ -344,9 +475,8 @@ class ContractInsightsEngine:
                             timeout=max(20, Config.LLAMA_TIMEOUT // 2),
                             stream=True,
                         )
-                        retry_json = self._extract_json(retry_response)
-                        if retry_json:
-                            retry_data = json.loads(retry_json)
+                        retry_data = self._parse_llama_json(retry_response)
+                        if retry_data:
                             answer_points = [
                                 point.strip()
                                 for point in retry_data.get("answer", [])
@@ -389,9 +519,53 @@ class ContractInsightsEngine:
     def _format_source_label(source_entry: Dict[str, Any]) -> str:
         source = source_entry.get("source", "unknown")
         page = source_entry.get("page")
+        section_heading = source_entry.get("section_heading")
+        clause = source_entry.get("clause")
+        clause_heading = source_entry.get("clause_heading")
+
+        if clause and clause != "intro":
+            label_parts = [clause]
+            if clause_heading:
+                label_parts.append(clause_heading)
+            elif section_heading:
+                label_parts.append(section_heading)
+            return f"{source} ({' – '.join(label_parts)})"
+
+        if section_heading:
+            return f"{source} ({section_heading})"
+
         if page is not None:
             return f"{source} (page {page})"
         return source
+
+    @staticmethod
+    def _normalize_section_slug(value: str) -> str:
+        return re.sub(r"[^A-Z0-9]+", " ", value.upper()).strip()
+
+    def _infer_doc_type(self, query: str) -> str:
+        lower = query.lower()
+        if any(term in lower for term in ["walking boss", "walking bosses", "foremen", "foreman"]):
+            return "walking_bosses"
+        if "clerk" in lower:
+            return "clerks"
+        return "longshore"
+
+    def _craft_opening_text(self, query: str, doc_type: str) -> str:
+        doc_label_map = {
+            "walking_bosses": "Walking Bosses and Foremen Agreement",
+            "clerks": "Clerks Contract Document",
+            "longshore": "Longshore Contract Document",
+        }
+        doc_label = doc_label_map.get(doc_type, "Longshore Contract Document")
+        question_summary = re.sub(r"\s+", " ", query.strip())
+        return f"Key findings from the {doc_label} regarding “{question_summary}”:"
+
+    def _extract_section_reference(self, query: str) -> Optional[str]:
+        for pattern in (SECTION_REF_REGEX, ARTICLE_REF_REGEX, APPENDIX_REF_REGEX):
+            match = pattern.search(query)
+            if match:
+                return self._normalize_section_slug(match.group(1))
+        return None
 
     def _build_fallback_summary(self, query: str, sources: List[Dict[str, Any]]) -> List[str]:
         if not sources:
@@ -515,4 +689,20 @@ class ContractInsightsEngine:
         if start == -1 or end == -1 or end <= start:
             return None
         return text[start : end + 1]
+
+    def _parse_llama_json(self, raw_text: str) -> Optional[Dict[str, Any]]:
+        json_block = self._extract_json(raw_text)
+        if not json_block:
+            return None
+
+        try:
+            return json.loads(json_block)
+        except json.JSONDecodeError:
+            cleaned = re.sub(r",\s*([}\]])", r"\1", json_block)
+            cleaned = re.sub(r"\\(?![/u\"bfnrt])", "", cleaned)
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError as exc:
+                self.logger.warning("Failed to parse LLaMA JSON response: %s", exc)
+                return None
 

@@ -1,4 +1,4 @@
-"""Contract Insights Engine FastAPI Service."""
+"""Contracts Copilot FastAPI Service."""
 
 import logging
 from typing import Any, Dict, List, Optional
@@ -20,7 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger("contract-insights-api")
 
 app = FastAPI(
-    title="Contract Insights Engine",
+    title="Contracts Copilot",
     description="Ask questions about ILWU/PMA maritime agreements (2022-2028).",
     version="1.0.0",
 )
@@ -65,16 +65,16 @@ async def startup_event() -> None:
     try:
         Config.validate()
         engine = ContractInsightsEngine()
-        logger.info("Contract Insights Engine initialized.")
+        logger.info("Contracts Copilot initialized.")
     except Exception as exc:  # pragma: no cover - startup failure logging.
-        logger.exception("Failed to initialize Contract Insights Engine: %s", exc)
+        logger.exception("Failed to initialize Contracts Copilot: %s", exc)
         engine = None
 
 
 @app.get("/", tags=["General"])
 async def root() -> Dict[str, str]:
     return {
-        "message": "Contract Insights Engine",
+        "message": "Contracts Copilot",
         "version": "1.0.0",
         "description": "Embed questions, retrieve clauses from the 'contracts' collection, and synthesize answers.",
     }

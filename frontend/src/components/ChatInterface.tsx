@@ -31,6 +31,9 @@ interface SourceEntry {
   page?: number;
   score?: number;
   excerpt?: string;
+  section_heading?: string;
+  clause?: string;
+  clause_heading?: string;
 }
 
 interface Message {
@@ -46,6 +49,7 @@ interface Message {
   answer_points?: string[];
   disclaimer?: string | null;
   sources?: SourceEntry[];
+  opening?: string | null;
 }
 
 const ChatInterface = () => {
@@ -112,23 +116,34 @@ const ChatInterface = () => {
           query_classification: data.query_classification || null,
           answer_points: data.answer_points || [],
           disclaimer: data.disclaimer ?? null,
-          sources: data.sources || []
+          sources: data.sources || [],
+          opening: data.opening ?? null,
         },
       ]);
     } catch (error) {
       console.error("Error sending message:", error);
       toast({
         title: "Error",
-        description: "Failed to get response from the contract engine. Please confirm the backend API is running on http://localhost:8000",
+        description: "Can't process your request currently. Please retry in a moment.",
         variant: "destructive",
       });
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Can't process your request currently. Please retry in a moment.",
+          response_type: "error",
+          userQuery: content,
+          opening: null,
+        },
+      ]);
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="flex h-screen flex-col bg-gradient-to-b from-[#0f172a] via-[#0b1b33] to-[#0f172a] text-foreground">
+    <div className="flex h-screen flex-col bg-gradient-to-b from-[#d9f0ff] via-[#bfe3ff] to-[#ecf8ff] text-foreground">
       {/* Header */}
       <div className="border-b border-border bg-card/60 backdrop-blur-sm px-4 py-4 shadow-soft">
         <div className="mx-auto flex max-w-3xl items-center justify-between gap-3">
@@ -137,7 +152,7 @@ const ChatInterface = () => {
               <Anchor className="h-6 w-6 text-primary-foreground" />
             </div>
             <div>
-              <h1 className="text-xl font-semibold text-foreground">Contract Insights Engine</h1>
+              <h1 className="text-xl font-semibold text-foreground">Contracts Copilot</h1>
               <p className="text-sm text-muted-foreground">
                 Navigate longshore agreements with maritime-grade intelligence
               </p>
@@ -192,7 +207,8 @@ const ChatInterface = () => {
             query_classification={message.query_classification}
             answer_points={message.answer_points}
             disclaimer={message.disclaimer}
-            sources={message.sources}
+              sources={message.sources}
+              opening={message.opening}
             />
           ))}
           

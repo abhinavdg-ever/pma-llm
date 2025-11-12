@@ -1,11 +1,11 @@
 version: '3.8'
 
 services:
-  ai-query-service:
+  contracts-copilot:
     build: .
-    container_name: ai-sleep-coach-query
+    container_name: contracts-copilot
     ports:
-      - "8015:8000"   # external:internal - nginx listens on 8000 internally
+      - "8080:8080"   # external:internal - nginx listens on 8080 internally
     restart: always
     environment:
       # MySQL Configuration
@@ -18,7 +18,7 @@ services:
       - LLAMA_MODEL=llama3
       # Qdrant Configuration
       - QDRANT_URL=http://34.131.37.125:6333
-      - QDRANT_COLLECTION_NAME=docs
+      - QDRANT_COLLECTION_NAME=contracts
       # Embedding Service Configuration
       - EMBEDDING_API_URL=http://34.131.37.125:8000/embed
       # OpenAI (optional)

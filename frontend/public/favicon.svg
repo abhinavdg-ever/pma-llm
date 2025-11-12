@@ -1,38 +1,38 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <linearGradient id="deepSea" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#0f172a" />
-      <stop offset="100%" stop-color="#0b3a60" />
+    <linearGradient id="sky" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#e7f5ff" />
+      <stop offset="100%" stop-color="#c7e6ff" />
     </linearGradient>
-    <linearGradient id="anchorSteel" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#9bd7ff" />
-      <stop offset="100%" stop-color="#4fa3d6" />
+    <linearGradient id="sea" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4da3ff" />
+      <stop offset="100%" stop-color="#2a7bd6" />
     </linearGradient>
-    <filter id="anchorShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#06111f" flood-opacity="0.45" />
+    <linearGradient id="anchor" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#d2ecff" />
+    </linearGradient>
+    <filter id="softShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#0a2f4f" flood-opacity="0.22" />
     </filter>
   </defs>
 
-  <rect x="0" y="0" width="64" height="64" rx="16" fill="url(#deepSea)" />
-  <circle cx="32" cy="32" r="26" fill="rgba(15, 58, 96, 0.65)" />
-  <circle cx="32" cy="19" r="6" fill="rgba(12, 107, 168, 0.25)" />
+  <rect width="64" height="64" rx="16" fill="url(#sky)" />
+  <path d="M8 40c6 4 12 6 24 6s18-2 24-6v14H8z" fill="url(#sea)" />
+  <path d="M10 48c5 3 11 5 22 5s17-2 22-5" stroke="rgba(255,255,255,0.35)" stroke-width="2" fill="none" stroke-linecap="round" />
 
-  <g filter="url(#anchorShadow)">
+  <g filter="url(#softShadow)">
     <path
-      d="M32 12a3 3 0 0 1 3 3v8h5a2 2 0 1 1 0 4h-5v7c5.53 0.92 10 5.75 10 11.55h-4c0-4.14-3.17-7.55-7.12-7.55H35v15.34l7.07-7.07a2 2 0 1 1 2.83 2.83l-9.9 9.9a1.5 1.5 0 0 1-2.12 0l-9.9-9.9a2 2 0 0 1 2.83-2.83L29 51.34V36h-1.88C23.17 36 20 39.41 20 43.55h-4C16 37.75 20.47 32.92 26 32v-5h-5a2 2 0 1 1 0-4h5v-8a3 3 0 0 1 3-3h3z"
-      fill="url(#anchorSteel)"
-      stroke="#d8f1ff"
-      stroke-width="1.2"
+      d="M34 15v8h5a1.8 1.8 0 1 1 0 3.6h-5v8.4c4.62 0.74 8.34 4.84 8.34 9.66h-3.6c0-3.5-2.7-6.38-6.02-6.38H32v12.3l6-6a1.8 1.8 0 1 1 2.55 2.55l-8.44 8.44a1.4 1.4 0 0 1-1.98 0l-8.44-8.44a1.8 1.8 0 1 1 2.55-2.55l6 6V38.9h-1.57C21.7 38.9 19 41.78 19 45.28h-3.6c0-4.82 3.72-8.92 8.34-9.66V27.6h-5a1.8 1.8 0 1 1 0-3.6h5v-8a2.4 2.4 0 0 1 2.4-2.4h5.2A2.4 2.4 0 0 1 34 15z"
+      fill="url(#anchor)"
+      stroke="#2a7bd6"
+      stroke-width="1"
       stroke-linejoin="round"
     />
-    <circle cx="32" cy="18.5" r="2.4" fill="#0f172a" opacity="0.35" />
+    <circle cx="32" cy="17.5" r="2" fill="#2a7bd6" opacity="0.4" />
   </g>
 
-  <path
-    d="M12 45c2.8 8.5 10.8 15 20 15s17.2-6.5 20-15"
-    stroke="rgba(155, 215, 255, 0.35)"
-    stroke-width="2"
-    stroke-linecap="round"
-    fill="none"
-  />
+  <circle cx="18" cy="18" r="4" fill="#ffffff" opacity="0.55" />
+  <circle cx="46" cy="14" r="3" fill="#ffffff" opacity="0.45" />
+  <circle cx="50" cy="20" r="2.5" fill="#ffffff" opacity="0.35" />
 </svg>

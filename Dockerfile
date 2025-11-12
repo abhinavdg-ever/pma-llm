@@ -1,4 +1,4 @@
-# Multi-stage build for Sleep Coach LLM
+# Multi-stage build for Contracts Copilot
 
 # Frontend builder stage
 FROM node:20-alpine AS frontend-builder
@@ -58,15 +58,15 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy Python backend files
 COPY app.py ./
-COPY sleep_coach_llm.py ./
+COPY contract_llm.py ./
 
 # Copy built frontend from previous stage
 COPY --from=frontend-builder /app/frontend/dist /var/www/html
 
 # Configure nginx to serve frontend and proxy API requests
-# Note: docker-compose.yml maps 8015:8000, so nginx listens on 8000 internally
+# Nginx listens on 8080 internally; docker-compose maps host 8080 → 8080
 RUN echo 'server { \
-    listen 8000; \
+    listen 8080; \
     server_name _; \
     root /var/www/html; \
     index index.html; \
@@ -79,7 +79,7 @@ RUN echo 'server { \
     # Proxy API requests to FastAPI on port 8001 (strip /api prefix) \
     location /api/ { \
         rewrite ^/api/(.*) /$1 break; \
-        proxy_pass http://localhost:8001; \
+        proxy_pass http://localhost:8081; \
         proxy_set_header Host $host; \
         proxy_set_header X-Real-IP $remote_addr; \
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
@@ -91,7 +91,7 @@ RUN echo 'server { \
     \
     # Also proxy non-/api routes that are API endpoints (for backward compatibility) \
     location ~ ^/(health|query|wearable|knowledge|stats|trends|docs|redoc|openapi.json) { \
-        proxy_pass http://localhost:8001; \
+        proxy_pass http://localhost:8081; \
         proxy_set_header Host $host; \
         proxy_set_header X-Real-IP $remote_addr; \
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
@@ -109,11 +109,11 @@ RUN chmod +x docker-entrypoint.sh
 # Note: nginx needs to run as root to bind to ports, so we keep root user
 # The FastAPI process runs as root but this is acceptable for containerized apps
 
-# Expose port (matches docker-compose.yml mapping 8015:8000)
-EXPOSE 8000
+# Expose port (matches docker-compose.yml mapping 8080:8080)
+EXPOSE 8080
 
 # Health check (matches docker-compose.yml)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost/health || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
 CMD ["./docker-entrypoint.sh"]
