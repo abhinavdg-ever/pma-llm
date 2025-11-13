@@ -23,12 +23,17 @@ services:
       - EMBEDDING_API_URL=http://34.131.37.125:8000/embed
       # OpenAI (optional)
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-    env_file:
-      - ./local-llm/.env   # Load MYSQL_PASSWORD and other vars from .env file
+      # Wage schedule database
+      - WAGE_DB_HOST=72.60.96.212
+      - WAGE_DB_PORT=3306
+      - WAGE_DB_USER=external
+      - WAGE_DB_PASSWORD=External22x^^5420!
+      - WAGE_DB_NAME=ym_test
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+      
 

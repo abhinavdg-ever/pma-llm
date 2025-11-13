@@ -4,11 +4,28 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+import pandas as pd
 import requests
+import mysql.connector
 
 SECTION_REF_REGEX = re.compile(r"(section\s+\d+[A-Za-z0-9\-\.]*)", re.IGNORECASE)
 ARTICLE_REF_REGEX = re.compile(r"(article\s+\d+[A-Za-z0-9\-\.]*)", re.IGNORECASE)
 APPENDIX_REF_REGEX = re.compile(r"(appendix\s+[A-Za-z0-9]+)", re.IGNORECASE)
+WAGE_KEYWORDS = [
+    "wage",
+    "salary",
+    "pay rate",
+    "payroll",
+    "shift pay",
+    "overtime",
+    "hourly",
+    "rate of pay",
+    "compensation",
+    "wages",
+    "pay schedule",
+]
+
+WAGE_TABLE_NAME = "wage_schedule_pma"
 
 
 class Config:
@@ -209,12 +226,14 @@ class QueryClassifier:
             "section",
             "grievance",
             "arbitration",
-            "pay rate",
             "vacation",
             "gang",
         ]
         if any(token in query_lower for token in maritime_keywords):
             return "contract_knowledge"
+
+        if any(keyword in query_lower for keyword in WAGE_KEYWORDS):
+            return "wage_schedule"
 
         if not self.llama.available():
             return "generic_knowledge"
@@ -249,6 +268,38 @@ class ContractInsightsEngine:
         self.llama = LlamaClient(Config.LLAMA_API_URL, Config.LLAMA_MODEL)
         self.classifier = QueryClassifier(self.llama)
         self.logger = logging.getLogger("contract-insights-engine")
+        self.wage_db_conn: Optional[mysql.connector.MySQLConnection] = None
+        self.wage_schema: Optional[str] = None
+        self._initialize_wage_schedule()
+
+    def _initialize_wage_schedule(self) -> None:
+        host = os.getenv("WAGE_DB_HOST") or "72.60.96.212"
+        user = os.getenv("WAGE_DB_USER") or "external"
+        password = os.getenv("WAGE_DB_PASSWORD") or "External22x^^5420!"
+        database = os.getenv("WAGE_DB_NAME") or "ym_raw_data_downstream"
+        port = int(os.getenv("WAGE_DB_PORT", "3306"))
+
+        try:
+            conn = mysql.connector.connect(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                database=database,
+                autocommit=True,
+            )
+            cursor = conn.cursor()
+            cursor.execute(f"DESCRIBE {WAGE_TABLE_NAME}")
+            columns = cursor.fetchall()
+            cursor.close()
+            schema_lines = [f"- {col[0]} ({col[1]})" for col in columns]
+            self.wage_db_conn = conn
+            self.wage_schema = "\n".join(schema_lines)
+            self.logger.info("Wage schedule connection established (table=%s)", WAGE_TABLE_NAME)
+        except Exception as exc:
+            self.logger.warning("Failed to initialize wage schedule connection: %s", exc)
+            self.wage_db_conn = None
+            self.wage_schema = None
 
     def handle_query(self, query: str, top_k: int = 3) -> Dict[str, Any]:
         classification = self.classifier.classify(query)
@@ -288,6 +339,9 @@ class ContractInsightsEngine:
                 filter_conditions=filter_conditions or None,
                 debug_info=debug_info,
             )
+        elif classification == "wage_schedule":
+            debug_info["doc_type"] = "wage_schedule"
+            payload = self._answer_wage_schedule(query, debug_info)
         elif classification == "generic_knowledge":
             payload = self._answer_with_generic_llm(query)
             debug_info["doc_type"] = "n/a"
@@ -306,6 +360,7 @@ class ContractInsightsEngine:
             "contract_knowledge": "Contract Knowledge",
             "generic_knowledge": "General Knowledge",
             "off_topic": "Off-Topic",
+            "wage_schedule": "Wage Schedule · SQL",
         }
         if classification == "contract_knowledge":
             doc_type = payload.get("doc_type") or self._infer_doc_type(query)
@@ -318,6 +373,8 @@ class ContractInsightsEngine:
             payload["query_classification"] = f"Contract Knowledge · {doc_label}"
             payload["doc_type"] = doc_type
             debug_info["doc_type"] = doc_type
+        elif classification == "wage_schedule":
+            payload["query_classification"] = "Wage Schedule · SQL"
         else:
             payload["query_classification"] = label_map.get(classification, classification)
         payload["debug"] = debug_info
@@ -423,7 +480,7 @@ class ContractInsightsEngine:
     ) -> Tuple[List[str], str]:
         default_disclaimer = "This summary is informational. Refer to the ILWU/PMA agreements for the authoritative language."
         answer_points: List[str] = []
-        disclaimer = default_disclaimer
+        disclaimer = self._normalize_disclaimer(default_disclaimer)
 
         if self.llama.available():
             context_snippets = "\n\n".join(
@@ -455,7 +512,7 @@ class ContractInsightsEngine:
                     ]
                     disc = data.get("disclaimer")
                     if isinstance(disc, str) and disc.strip():
-                        disclaimer = disc.strip()
+                        disclaimer = self._normalize_disclaimer(disc.strip())
             except Exception as exc:  # pragma: no cover
                 print(f"[ContractInsightsEngine] Llama synthesis failed: {exc}")
                 if len(sources) > 2:
@@ -484,7 +541,7 @@ class ContractInsightsEngine:
                             ]
                             disc = retry_data.get("disclaimer")
                             if isinstance(disc, str) and disc.strip():
-                                disclaimer = disc.strip()
+                                disclaimer = self._normalize_disclaimer(disc.strip())
                     except Exception as retry_exc:  # pragma: no cover
                         print(f"[ContractInsightsEngine] Reduced-context Llama retry failed: {retry_exc}")
 
@@ -538,9 +595,117 @@ class ContractInsightsEngine:
             return f"{source} (page {page})"
         return source
 
+    def _generate_wage_sql(self, question: str) -> Optional[str]:
+        if not self.llama.available():
+            return None
+
+        schema_desc = self.wage_schema or ""
+        prompt = (
+            "You are an assistant that writes MySQL SELECT queries for the wage schedule table.\n"
+            f"Table name: {WAGE_TABLE_NAME}\n"
+            f"Columns:\n{schema_desc}\n\n"
+            "Rules:\n"
+            "- Generate a single SELECT statement.\n"
+            "- Infer filters (employee type, skill level, fiscal year, shift) from the question.\n"
+            "- Limit the result to 100 rows unless aggregation is required.\n"
+            "- Do not include comments or explanations.\n\n"
+            f"Question: {question}\n\nSQL:"
+        )
+        raw_sql = self.llama.generate(prompt, stream=True)
+        return self._extract_sql_statement(raw_sql)
+
+    @staticmethod
+    def _extract_sql_statement(text: str) -> Optional[str]:
+        if not text:
+            return None
+        cleaned = text.strip()
+        cleaned = re.sub(r"```sql", "", cleaned, flags=re.IGNORECASE)
+        cleaned = cleaned.replace("```", "").strip()
+        match = re.search(r"SELECT\s.+", cleaned, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        sql = match.group(0)
+        sql = sql.split(";")[0]
+        return sql.strip()
+
+    def _answer_wage_schedule(self, query: str, debug_info: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.wage_db_conn or not self.wage_schema:
+            message = "Wage schedule data is not currently available."
+            debug_info["wage_sql"] = None
+        return {
+            "response_type": "wage_schedule_sql",
+                "content": message,
+                "results": [],
+                "sql_query": None,
+                "matches": [],
+                "sources": [],
+                "total_matches": 0,
+                "answer_points": [],
+                "disclaimer": None,
+                "opening": f"Wage schedule details for “{query}”",
+            }
+
+        sql_query = self._generate_wage_sql(query)
+        if not sql_query:
+            message = "I couldn't generate a wage schedule query from that question."
+            debug_info["wage_sql"] = None
+            return {
+                "response_type": "wage_schedule_sql",
+                "content": message,
+                "results": [],
+                "sql_query": None,
+                "matches": [],
+                "sources": [],
+                "total_matches": 0,
+                "answer_points": [],
+                "disclaimer": None,
+                "opening": f"Wage schedule details for “{query}”",
+            }
+
+        try:
+            df = pd.read_sql(sql_query, self.wage_db_conn)
+        except Exception as exc:
+            self.logger.error("Error executing wage schedule SQL: %s", exc)
+            debug_info["wage_sql"] = sql_query
+            return {
+                "response_type": "wage_schedule_sql",
+                "content": f"I encountered an error while running the wage schedule query: {exc}",
+                "results": [],
+                "sql_query": sql_query,
+                "matches": [],
+                "sources": [],
+                "total_matches": 0,
+                "answer_points": [],
+                "disclaimer": None,
+                "opening": f"Wage schedule details for “{query}”",
+            }
+
+        debug_info["wage_sql"] = sql_query
+        debug_info["row_count"] = len(df)
+        table_text = df.to_string(index=False) if not df.empty else "No rows returned for the requested criteria."
+
+        return {
+            "response_type": "wage_schedule_sql",
+            "content": f"SQL:\n{sql_query}\n\nResults:\n{table_text}",
+            "results": df.to_dict(orient="records"),
+            "sql_query": sql_query,
+            "matches": [],
+            "sources": [],
+            "total_matches": len(df),
+            "answer_points": [],
+            "disclaimer": None,
+            "opening": f"Wage schedule details for “{query}”",
+        }
+
     @staticmethod
     def _normalize_section_slug(value: str) -> str:
         return re.sub(r"[^A-Z0-9]+", " ", value.upper()).strip()
+
+    @staticmethod
+    def _normalize_disclaimer(text: str) -> str:
+        cleaned = re.sub(r"^\s*single[-\s]*sentence\s*reminder\s*:\s*", "", text, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned
 
     def _infer_doc_type(self, query: str) -> str:
         lower = query.lower()
