@@ -2555,12 +2555,20 @@ class ContractInsightsEngine:
         api_name = "OpenAI" if mode == "openai" else "Llama"
         self.logger.info(f"[Generic Knowledge] Using {api_name} API to generate response")
         if not llm_client.available():
-            return {
-                "response_type": "generic_llm",
-                "content": (
+            # Mode-aware error message
+            if mode == "openai":
+                error_msg = (
+                    "This question appears to be general knowledge. "
+                    "Please configure OPENAI_API_KEY environment variable for richer responses."
+                )
+            else:
+                error_msg = (
                     "This question appears to be general knowledge. "
                     "Please configure LLAMA_API_URL for richer responses."
-                ),
+                )
+            return {
+                "response_type": "generic_llm",
+                "content": error_msg,
                 "answer_points": [],
                 "disclaimer": (
                     "I'm not specialized in general topics, but based on my training data here's a high-level answer. "
