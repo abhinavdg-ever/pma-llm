@@ -48,3 +48,4 @@ Thumbs.db
 # Data files
 *.csv
 
+docker-compose.yml
