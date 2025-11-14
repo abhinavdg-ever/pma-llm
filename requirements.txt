@@ -5,13 +5,7 @@ mysql-connector-python
 pydantic
 requests
 pandas
-langchain
-pinecone
-openai
-langchain-community
-langchain-openai
-langchain-pinecone
 qdrant-client
 tabulate
 pypdf
-sentence-transformers
+# sentence-transformers - Only needed for ingestion scripts and embedding service, not main app runtime
