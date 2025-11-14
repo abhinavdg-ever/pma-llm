@@ -6,6 +6,23 @@ import TypingIndicator from "./TypingIndicator";
 import { Anchor, Trash2, Lightbulb, Sparkles, ChevronRight, HelpCircle, Copy, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Accordion,
   AccordionContent,
   AccordionItem,
@@ -68,6 +85,7 @@ interface Message {
   userQuery?: string; // Store original user query for context
   query_classification?: string; // SQL or Knowledge/General
   answer_points?: string[];
+  tables?: Array<{ headers: string[]; rows: string[][] }> | null;
   disclaimer?: string | null;
   sources?: SourceEntry[];
   opening?: string | null;
@@ -79,6 +97,9 @@ const ChatInterface = () => {
   const [currentQuery, setCurrentQuery] = useState<string>("");
   const [usedSampleQueries, setUsedSampleQueries] = useState<Set<string>>(new Set());
   const [isHelpOpen, setIsHelpOpen] = useState(false);
+  const [mode, setMode] = useState<"llama" | "openai">("llama");
+  const [showModeChangeDialog, setShowModeChangeDialog] = useState(false);
+  const [pendingMode, setPendingMode] = useState<"llama" | "openai">("llama");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
@@ -89,6 +110,8 @@ const ChatInterface = () => {
         "Plot the latest salary for walking bosses for current year",
         "Show wage rates for Skill 2 longshoremen with <1000 hours of experience from FY25 to FY27",
         "Tabulate hourly rates for clerks in fiscal year 2025",
+        "Who has the highest wage rate amongst all as per 2025 numbers",
+        "Which skill type and employee type receives the highest hourly salary in 2025?",
       ]
     },
     {
@@ -97,6 +120,8 @@ const ChatInterface = () => {
         "Explain the guidelines for registered clerks meetings",
         "How many vacation days do longshoremen get?",
         "What are the guarantee rules for walking bosses?",
+        "What is Lash Barge Jurisdiction?",
+        "Summarize the rules for meal breaks and relief periods for Longshoremen",
       ]
     }
   ];
@@ -180,6 +205,37 @@ const ChatInterface = () => {
     handleSendMessage(query);
   };
 
+  const handleModeChange = (newMode: "llama" | "openai") => {
+    if (isLoading) {
+      return; // Prevent mode change while loading
+    }
+    
+    // If selecting the same mode, do nothing
+    if (newMode === mode) {
+      return;
+    }
+    
+    // If mode is actually changing and there are messages, show confirmation
+    if (messages.length > 0) {
+      setPendingMode(newMode);
+      setShowModeChangeDialog(true);
+    } else {
+      // No messages, just switch
+      setMode(newMode);
+    }
+  };
+
+  const confirmModeChange = () => {
+    setMode(pendingMode);
+    setMessages([]);
+    setUsedSampleQueries(new Set());
+    setShowModeChangeDialog(false);
+    toast({
+      title: "Mode switched",
+      description: `Switched to ${pendingMode === "openai" ? "OpenAI" : "Llama"} mode. Chat history cleared.`,
+    });
+  };
+
   const handleSendMessage = async (content: string) => {
     const userMessage: Message = { role: "user", content, userQuery: content };
     setMessages((prev) => [...prev, userMessage]);
@@ -196,7 +252,8 @@ const ChatInterface = () => {
           },
           body: JSON.stringify({ 
             user_id: DEFAULT_USER_ID,
-            query: content 
+            query: content,
+            mode: mode
           }),
         }
       );
@@ -224,6 +281,7 @@ const ChatInterface = () => {
           userQuery: content, // Pass the original user query for chart detection
           query_classification: data.query_classification || null,
           answer_points: data.answer_points || [],
+          tables: data.tables || null,
           disclaimer: data.disclaimer ?? null,
           sources: data.sources || [],
           opening: data.opening ?? null,
@@ -263,12 +321,12 @@ const ChatInterface = () => {
             </div>
             <div>
               <h1 className="text-xl font-semibold text-foreground">Contracts Copilot</h1>
-              <p className="text-sm text-muted-foreground">
-                Navigate longshore agreements with maritime-grade intelligence
+              <p className="text-sm text-muted-foreground whitespace-nowrap">
+                Navigating agreements with maritime-grade intelligence
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 ml-auto">
             <Dialog open={isHelpOpen} onOpenChange={setIsHelpOpen}>
               <DialogTrigger asChild>
                 <Button
@@ -419,6 +477,38 @@ const ChatInterface = () => {
               <Trash2 className="h-4 w-4" />
               {messages.length > 0 && <span>Clear Chat</span>}
             </Button>
+            <Select 
+              value={mode} 
+              onValueChange={(value) => handleModeChange(value as "llama" | "openai")} 
+              disabled={isLoading}
+            >
+              <SelectTrigger className="w-[130px] h-9 text-sm">
+                <SelectValue placeholder="Select mode" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="llama">Llama</SelectItem>
+                <SelectItem value="openai">OpenAI</SelectItem>
+              </SelectContent>
+            </Select>
+            <AlertDialog open={showModeChangeDialog} onOpenChange={(open) => {
+              setShowModeChangeDialog(open);
+              // If dialog is closed without confirming, the Select will revert to current mode
+            }}>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Clear Chat History?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Switching from {mode === "llama" ? "Llama" : "OpenAI"} to {pendingMode === "llama" ? "Llama" : "OpenAI"} will clear your current chat history. Do you want to continue?
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={confirmModeChange}>
+                    Continue
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </div>
         </div>
       </div>
@@ -463,6 +553,7 @@ const ChatInterface = () => {
               userQuery={message.userQuery}
               query_classification={message.query_classification}
             answer_points={message.answer_points}
+            tables={message.tables}
             disclaimer={message.disclaimer}
               sources={message.sources}
               opening={message.opening}

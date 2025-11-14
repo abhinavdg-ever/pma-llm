@@ -39,6 +39,8 @@ engine: Optional[ContractInsightsEngine] = None
 class QueryRequest(BaseModel):
     query: str
     top_k: Optional[int] = 5
+    mode: Optional[str] = "llama"  # "llama" or "openai"
+    user_id: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -46,6 +48,7 @@ class QueryResponse(BaseModel):
     response_type: Optional[str] = None
     content: str = ""
     answer_points: List[str] = Field(default_factory=list)
+    tables: List[Dict[str, Any]] = Field(default_factory=list)  # Add tables field
     disclaimer: Optional[str] = None
     sources: List[Dict[str, Any]] = Field(default_factory=list)
     matches: List[Dict[str, Any]] = Field(default_factory=list)
@@ -104,7 +107,8 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
     if not engine:
         raise HTTPException(status_code=503, detail="Contract engine not initialized.")
     try:
-        result = engine.handle_query(request.query, top_k=request.top_k or 5)
+        mode = request.mode or "llama"
+        result = engine.handle_query(request.query, top_k=request.top_k or 5, mode=mode)
         return QueryResponse(**result)
     except Exception as exc:
         logger.exception("Error processing query: %s", exc)

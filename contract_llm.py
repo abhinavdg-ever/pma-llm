@@ -12,21 +12,40 @@ from tabulate import tabulate
 SECTION_REF_REGEX = re.compile(r"(section\s+\d+[A-Za-z0-9\-\.]*)", re.IGNORECASE)
 ARTICLE_REF_REGEX = re.compile(r"(article\s+\d+[A-Za-z0-9\-\.]*)", re.IGNORECASE)
 APPENDIX_REF_REGEX = re.compile(r"(appendix\s+[A-Za-z0-9]+)", re.IGNORECASE)
-WAGE_KEYWORDS = [
+# Core wage keywords - explicit wage/salary/pay terms that should trigger wage_schedule classification
+CORE_WAGE_KEYWORDS = [
     "wage",
-    "salary",
-    "pay rate",
-    "payroll",
-    "shift pay",
-    "overtime",
-    "hourly",
-    "rate of pay",
-    "compensation",
     "wages",
+    "salary",
+    "salaries",
+    "hourly rate",
+    "hourly rates",
+    "pay rate",
+    "pay rates",
+    "rate of pay",
+    "rates of pay",
+    "hourly wage",
+    "hourly wages",
+    "hourly salary",
+    "hourly salaries",
+    "shift pay",
+    "shift wages",
+    "shift salary",
+    "compensation",
+    "payroll",
     "pay schedule",
+    "wage schedule",
+    "overtime",
+]
+
+# Secondary keywords that only indicate wage_schedule when combined with core wage keywords
+SECONDARY_WAGE_KEYWORDS = [
     "plot",
     "tabulate",
-    "list",
+    "fiscal year",
+    "fy",
+    "shift",
+    "shifts",
 ]
 
 WAGE_TABLE_NAME = "wage_schedule_pma"
@@ -37,12 +56,15 @@ class Config:
 
     QDRANT_URL = os.getenv("QDRANT_URL", "http://34.131.37.125:6333")
     QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION_NAME", "contracts")
+    QDRANT_COLLECTION_BIG = os.getenv("QDRANT_COLLECTION_NAME_BIG", "contracts_big")
     EMBEDDING_API_URL = os.getenv("EMBEDDING_API_URL", "http://34.131.37.125:8000/embed")
     EMBEDDING_DIMENSION = 768  # all-mpnet-base-v2 produces 768-dimensional vectors
     LLAMA_API_URL = os.getenv("LLAMA_API_URL", "http://34.131.37.125:11434/api/generate")
     LLAMA_MODEL = os.getenv("LLAMA_MODEL", "llama3")
     LLAMA_TIMEOUT = int(os.getenv("LLAMA_TIMEOUT", "150"))
     LLAMA_TEMPERATURE = float(os.getenv("LLAMA_TEMPERATURE", "0.1"))  # Low temperature for more deterministic responses
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Set via environment variable
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     @classmethod
     def validate(cls) -> None:
@@ -53,7 +75,7 @@ class Config:
 
 
 class CustomEmbeddingClient:
-    """Thin wrapper over the embedding micro-service."""
+    """Thin wrapper over the embedding micro-service (sentence-transformers)."""
 
     def __init__(self, api_url: str):
         self.api_url = api_url
@@ -73,6 +95,108 @@ class CustomEmbeddingClient:
         return embedding
 
 
+class OpenAIEmbeddingClient:
+    """OpenAI embedding client for generating embeddings."""
+
+    def __init__(self, api_key: str, model: str = "text-embedding-3-small"):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = "https://api.openai.com/v1/embeddings"
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is required for OpenAI embeddings")
+
+    def embed(self, text: str, timeout: int = 60) -> List[float]:
+        """Generate embedding using OpenAI API."""
+        response = requests.post(
+            self.base_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "input": text,
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["data"][0]["embedding"]
+
+
+class OpenAIClient:
+    """OpenAI client used to synthesize an answer from retrieved clauses."""
+
+    def __init__(self, api_key: Optional[str], model: str = "gpt-4o-mini"):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = "https://api.openai.com/v1/chat/completions"
+
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+    def generate(self, prompt: str, timeout: Optional[int] = None, stream: bool = False) -> str:
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+        import logging
+        logger = logging.getLogger("contract-insights-engine")
+        logger.info(f"[OpenAI] Generating response with model: {self.model}, stream: {stream}, prompt_length: {len(prompt)}")
+
+        effective_timeout = timeout or Config.LLAMA_TIMEOUT
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": Config.LLAMA_TEMPERATURE,
+        }
+
+        if stream:
+            payload["stream"] = True
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json=payload,
+                timeout=effective_timeout,
+                stream=True,
+            )
+            response.raise_for_status()
+            chunks = []
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                line_text = line.decode("utf-8")
+                if line_text.startswith("data: "):
+                    data_str = line_text[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                        delta = data.get("choices", [{}])[0].get("delta", {})
+                        if "content" in delta:
+                            chunks.append(delta["content"])
+                    except json.JSONDecodeError:
+                        continue
+            return "".join(chunks).strip()
+
+        response = requests.post(
+            self.base_url,
+            headers=headers,
+            json=payload,
+            timeout=effective_timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+
+
 class LlamaClient:
     """Optional LLM client used to synthesize an answer from retrieved clauses."""
 
@@ -86,6 +210,10 @@ class LlamaClient:
     def generate(self, prompt: str, timeout: Optional[int] = None, stream: bool = False) -> str:
         if not self.api_url:
             raise RuntimeError("LLAMA_API_URL is not configured.")
+
+        import logging
+        logger = logging.getLogger("contract-insights-engine")
+        logger.info(f"[Llama] Generating response with model: {self.model}, stream: {stream}, prompt_length: {len(prompt)}")
 
         effective_timeout = timeout or Config.LLAMA_TIMEOUT
 
@@ -145,13 +273,21 @@ class VectorDatabase:
             from qdrant_client import QdrantClient
             from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-            self.client = QdrantClient(url=qdrant_url)
+            import logging
+            logger = logging.getLogger("contract-insights-engine")
+            logger.info(f"[VectorDatabase] Attempting to connect to Qdrant at {qdrant_url}, collection: {collection}")
+            
+            self.client = QdrantClient(url=qdrant_url, timeout=10)
             self.client.get_collection(collection)  # Raises if missing.
             self.Filter = Filter
             self.FieldCondition = FieldCondition
             self.MatchValue = MatchValue
+            logger.info(f"[VectorDatabase] Successfully connected to Qdrant collection: {collection}")
         except Exception as exc:  # pragma: no cover - graceful degradation.
-            print(f"[VectorDatabase] Falling back to mock search: {exc}")
+            import logging
+            logger = logging.getLogger("contract-insights-engine")
+            logger.error(f"[VectorDatabase] FAILED to connect to Qdrant at {qdrant_url}, collection: {collection}. Error: {exc}")
+            logger.warning("[VectorDatabase] Falling back to mock search - vector search will return mock data only")
             self.client = None
             self.Filter = None
             self.FieldCondition = None
@@ -227,9 +363,39 @@ class QueryClassifier:
     def classify(self, query: str) -> str:
         query_lower = query.lower()
 
-        # Check wage keywords FIRST (including plot, tabulate, list)
-        if any(keyword in query_lower for keyword in WAGE_KEYWORDS):
+        # Check for explicit contract/document keywords that should take precedence
+        contract_context_keywords = [
+            "holiday", "holidays", "vacation", "vacations", "contract document", 
+            "as per the contract", "per the contract", "according to contract",
+            "meeting", "meetings", "benefit", "benefits", "guarantee", "guarantees",
+            "summarize", "explain", "rules", "rule", "guidelines", "guideline",
+            "policy", "policies", "jurisdiction"
+        ]
+        has_contract_context = any(keyword in query_lower for keyword in contract_context_keywords)
+        
+        # STRICT wage classification: Only classify as wage_schedule if explicit wage/salary keywords are present
+        # Check for core wage keywords (wage, salary, hourly rate, etc.)
+        has_core_wage_keyword = any(keyword in query_lower for keyword in CORE_WAGE_KEYWORDS)
+        
+        # If query has contract context keywords like "summarize", "explain", "rules" without wage keywords,
+        # it should NOT be classified as wage_schedule
+        if has_contract_context and not has_core_wage_keyword:
+            # This is likely a contract knowledge query, not wage schedule
+            pass  # Continue to check contract_knowledge keywords below
+        elif has_core_wage_keyword:
+            # Explicit wage/salary keyword found - classify as wage_schedule
             return "wage_schedule"
+        
+        # For "list" keyword, only classify as wage_schedule if combined with explicit wage keywords
+        if "list" in query_lower:
+            if has_core_wage_keyword:
+                return "wage_schedule"
+            # If "list" is combined with secondary keywords AND fiscal year/shift context, might be wage
+            has_secondary_keyword = any(keyword in query_lower for keyword in SECONDARY_WAGE_KEYWORDS)
+            if has_secondary_keyword and ("fiscal year" in query_lower or "fy" in query_lower or "shift" in query_lower):
+                # Still require some wage context - check if it's clearly about wages
+                if "rate" in query_lower or "pay" in query_lower:
+                    return "wage_schedule"
 
         # Maritime/Contract keywords for contract_knowledge classification
         maritime_keywords = [
@@ -365,9 +531,20 @@ class ContractInsightsEngine:
 
     def __init__(self):
         Config.validate()
-        self.embedder = CustomEmbeddingClient(Config.EMBEDDING_API_URL)
-        self.vector_db = VectorDatabase(Config.QDRANT_URL, Config.QDRANT_COLLECTION, self.embedder)
+        # Create embedders for both modes
+        self.embedder_llama = CustomEmbeddingClient(Config.EMBEDDING_API_URL)  # sentence-transformers via API
+        self.embedder_openai = OpenAIEmbeddingClient(Config.OPENAI_API_KEY) if Config.OPENAI_API_KEY else None  # OpenAI embeddings
+        
+        # Create vector DBs for both collections
+        self.vector_db_llama = VectorDatabase(Config.QDRANT_URL, Config.QDRANT_COLLECTION, self.embedder_llama)
+        self.vector_db_openai = VectorDatabase(Config.QDRANT_URL, Config.QDRANT_COLLECTION_BIG, self.embedder_openai) if self.embedder_openai else None
+        
+        # Default to llama embedder for backward compatibility
+        self.embedder = self.embedder_llama
+        self.vector_db = self.vector_db_llama
+        
         self.llama = LlamaClient(Config.LLAMA_API_URL, Config.LLAMA_MODEL)
+        self.openai = OpenAIClient(Config.OPENAI_API_KEY, Config.OPENAI_MODEL)
         self.classifier = QueryClassifier(self.llama)
         self.logger = logging.getLogger("contract-insights-engine")
         self.wage_db_conn: Optional[mysql.connector.MySQLConnection] = None
@@ -423,21 +600,40 @@ class ContractInsightsEngine:
             self.wage_schema = None
             self.wage_metadata = {}
 
-    def handle_query(self, query: str, top_k: int = 5) -> Dict[str, Any]:
+    def _get_llm_client(self, mode: str = "llama"):
+        """Get the appropriate LLM client based on mode."""
+        if mode == "openai":
+            self.logger.info(f"[LLM Client] Using OpenAI API (model: {self.openai.model})")
+            return self.openai
+        self.logger.info(f"[LLM Client] Using Llama API (model: {self.llama.model}, url: {self.llama.api_url})")
+        return self.llama
+
+    def handle_query(self, query: str, top_k: int = 5, mode: str = "llama") -> Dict[str, Any]:
+        # Use top_k=5 for both modes (OpenAI and Llama use same vector search)
+        effective_top_k = top_k
+        
         classification = self.classifier.classify(query)
         debug_info: Dict[str, Any] = {
             "query": query,
             "initial_classification": classification,
         }
-        self.logger.info("Query received | classification=%s | query=%s", classification, query)
+        self.logger.info("Query received | classification=%s | mode=%s | top_k=%d | query=%s", classification, mode, effective_top_k, query)
 
         if classification == "contract_knowledge":
-            doc_type = self._infer_doc_type(query)
+            # Detect multiple employee types or use "all" if none specified
+            doc_types = self._infer_doc_types(query)
             filter_conditions: List[Any] = []
 
-            doc_type_condition = self.vector_db.make_match_condition("doc_type", doc_type)
-            if doc_type_condition:
-                filter_conditions.append(doc_type_condition)
+            # If multiple types, we'll search across all of them (no doc_type filter)
+            # If single type, filter by that type
+            if len(doc_types) == 1:
+                doc_type = doc_types[0]
+                doc_type_condition = self.vector_db.make_match_condition("doc_type", doc_type)
+                if doc_type_condition:
+                    filter_conditions.append(doc_type_condition)
+            else:
+                # Multiple types or "all" - don't filter by doc_type, search all collections
+                doc_type = None  # Will search all collections
 
             section_id_filter = self._extract_section_reference(query)
             if section_id_filter:
@@ -446,29 +642,52 @@ class ContractInsightsEngine:
                     filter_conditions.append(section_condition)
 
             self.logger.info(
-                "Contract query routed | doc_type=%s | section_id=%s",
-                doc_type,
+                "Contract query routed | doc_types=%s | section_id=%s",
+                doc_types,
                 section_id_filter or "none",
             )
-            debug_info["doc_type"] = doc_type
+            debug_info["doc_types"] = doc_types
+            debug_info["doc_type"] = doc_types[0] if len(doc_types) == 1 else "all"
             if section_id_filter:
                 debug_info["section_id"] = section_id_filter
 
+            # Use contracts_big collection + OpenAI embeddings for OpenAI mode
+            # Use contracts collection + sentence-transformers embeddings for Llama mode
+            if mode == "openai":
+                if not self.embedder_openai or not self.vector_db_openai:
+                    error_msg = (
+                        "OpenAI embeddings not configured. "
+                        "Please set OPENAI_API_KEY environment variable to use OpenAI mode."
+                    )
+                    self.logger.error(error_msg)
+                    raise ValueError(error_msg)
+                collection_name = Config.QDRANT_COLLECTION_BIG
+                vector_db = self.vector_db_openai
+                self.logger.info(f"[Vector Search] Using OpenAI embeddings + collection: {collection_name}")
+            else:
+                collection_name = Config.QDRANT_COLLECTION
+                vector_db = self.vector_db_llama
+                self.logger.info(f"[Vector Search] Using sentence-transformers embeddings + collection: {collection_name}")
+            
             payload = self._answer_with_contract_knowledge(
                 query,
-                top_k,
-                doc_type=doc_type,
+                effective_top_k,
+                doc_type=doc_types[0] if len(doc_types) == 1 else None,
+                doc_types=doc_types if len(doc_types) > 1 else None,
+                collection_name=collection_name,
                 filter_conditions=filter_conditions or None,
                 debug_info=debug_info,
+                mode=mode,
+                vector_db=vector_db,
             )
         elif classification == "wage_schedule":
             debug_info["doc_type"] = "wage_schedule"
-            payload = self._answer_wage_schedule(query, debug_info)
+            payload = self._answer_wage_schedule(query, debug_info, mode=mode)
         elif classification == "generic_knowledge":
-            payload = self._answer_with_generic_llm(query)
+            payload = self._answer_with_generic_llm(query, mode=mode)
             debug_info["doc_type"] = "n/a"
         else:
-            payload = self._answer_off_topic(query)
+            payload = self._answer_off_topic(query, mode=mode)
             debug_info["doc_type"] = "n/a"
 
         payload.setdefault("answer_points", [])
@@ -502,24 +721,160 @@ class ContractInsightsEngine:
         payload["debug"] = debug_info
         return payload
 
+    def _enhance_query_for_specific_topics(self, query: str) -> str:
+        """Enhance query with topic-specific terms to improve vector search relevance."""
+        query_lower = query.lower()
+        
+        # Enhance holiday queries - add specific terms that differentiate from vacations
+        if "holiday" in query_lower:
+            enhanced = f"{query} paid holidays holiday schedule New Year Christmas Thanksgiving Memorial Day Labor Day Independence Day"
+            self.logger.info(f"Enhanced holiday query: {enhanced}")
+            return enhanced
+        
+        # Enhance vacation queries - add specific terms
+        if "vacation" in query_lower and "holiday" not in query_lower:
+            enhanced = f"{query} vacation pay qualifying hours vacation weeks earned vacation"
+            self.logger.info(f"Enhanced vacation query: {enhanced}")
+            return enhanced
+        
+        return query
+    
+    def _filter_matches_by_topic(self, matches: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+        """Filter out irrelevant matches based on query topic."""
+        query_lower = query.lower()
+        
+        # If query is about holidays, filter out vacation-related content
+        if "holiday" in query_lower and "vacation" not in query_lower:
+            holiday_keywords = ["holiday", "paid holiday", "holiday schedule", "new year", "christmas", 
+                              "thanksgiving", "memorial day", "labor day", "independence day", "columbus day",
+                              "veterans day", "presidents day", "martin luther king"]
+            vacation_keywords = ["vacation pay", "qualifying hours", "vacation week", "earned vacation",
+                               "vacation with pay", "basic vacation", "additional vacation"]
+            
+            filtered = []
+            holiday_matches = []
+            for match in matches:
+                content_lower = match.get("content", "").lower()
+                # Check if content is clearly vacation-related
+                has_vacation_context = any(kw in content_lower for kw in vacation_keywords)
+                has_holiday_context = any(kw in content_lower for kw in holiday_keywords)
+                
+                # Prioritize holiday matches
+                if has_holiday_context:
+                    holiday_matches.append(match)
+                
+                # Exclude if it's vacation-related and has no holiday context
+                if has_vacation_context and not has_holiday_context:
+                    self.logger.info(f"Filtered out vacation-related match for holiday query: {content_lower[:100]}...")
+                    continue
+                filtered.append(match)
+            
+            # If we have holiday matches, prioritize them
+            if holiday_matches:
+                # Keep holiday matches first, then other filtered matches
+                holiday_match_ids = {id(m) for m in holiday_matches}
+                other_filtered = [m for m in filtered if id(m) not in holiday_match_ids]
+                filtered = holiday_matches + other_filtered
+                self.logger.info(f"Filtered {len(matches)} matches to {len(filtered)} holiday-relevant matches ({len(holiday_matches)} holiday-specific)")
+                return filtered
+            elif filtered:
+                self.logger.info(f"Filtered {len(matches)} matches to {len(filtered)} (no holiday-specific matches found, but kept non-vacation matches)")
+                return filtered
+        
+        # If query is about vacations, filter out holiday-related content
+        if "vacation" in query_lower and "holiday" not in query_lower:
+            holiday_keywords = ["paid holiday", "holiday schedule", "new year", "christmas", "thanksgiving"]
+            vacation_keywords = ["vacation pay", "qualifying hours", "vacation week", "earned vacation",
+                               "vacation with pay", "basic vacation", "additional vacation"]
+            
+            filtered = []
+            for match in matches:
+                content_lower = match.get("content", "").lower()
+                # Check if content is clearly holiday-related
+                has_holiday_context = any(kw in content_lower for kw in holiday_keywords)
+                has_vacation_context = any(kw in content_lower for kw in vacation_keywords)
+                
+                # Exclude if it's holiday-related and has no vacation context
+                if has_holiday_context and not has_vacation_context:
+                    self.logger.info(f"Filtered out holiday-related match for vacation query: {content_lower[:100]}...")
+                    continue
+                filtered.append(match)
+            
+            if filtered:
+                self.logger.info(f"Filtered {len(matches)} matches to {len(filtered)} vacation-relevant matches")
+                return filtered
+        
+        return matches
+
     def _answer_with_contract_knowledge(
         self,
         query: str,
         top_k: int,
         doc_type: Optional[str] = None,
+        doc_types: Optional[List[str]] = None,
         collection_name: Optional[str] = None,
         filter_conditions: Optional[List[Any]] = None,
         debug_info: Optional[Dict[str, Any]] = None,
+        mode: str = "llama",
+        vector_db: Optional[VectorDatabase] = None,
     ) -> Dict[str, Any]:
-        matches = self.vector_db.similarity_search(
-            query,
-            limit=top_k,
-            collection_override=collection_name,
-            filter_conditions=filter_conditions,
-        )
-        matches = matches[:top_k]
+        # Use provided vector_db or fall back to default based on mode
+        if vector_db is None:
+            vector_db = self.vector_db_llama if mode == "llama" else (self.vector_db_openai or self.vector_db_llama)
+        
+        # Enhance query for better vector search results
+        enhanced_query = self._enhance_query_for_specific_topics(query)
+        
+        # If multiple doc_types, search across all of them
+        if doc_types and len(doc_types) > 1:
+            all_matches = []
+            # Search each document type collection separately
+            for dt in doc_types:
+                dt_filter = [vector_db.make_match_condition("doc_type", dt)]
+                if filter_conditions:
+                    dt_filter.extend(filter_conditions)
+                # Search with limit per type, then combine and re-rank
+                type_matches = vector_db.similarity_search(
+                    enhanced_query,
+                    limit=top_k * 2,  # Get more per type to allow for re-ranking
+                    collection_override=collection_name,
+                    filter_conditions=dt_filter,
+                )
+                all_matches.extend(type_matches)
+            # Sort by score and take top_k
+            all_matches.sort(key=lambda x: x.get("score", 0), reverse=True)
+            matches = all_matches[:top_k * 2]  # Get more before filtering
+            # Filter matches by topic relevance
+            matches = self._filter_matches_by_topic(matches, query)
+            matches = matches[:top_k]
+        else:
+            # Single doc_type or none - normal search
+            matches = vector_db.similarity_search(
+                enhanced_query,
+                limit=top_k * 2,  # Get more before filtering
+                collection_override=collection_name,
+                filter_conditions=filter_conditions,
+            )
+            # Filter matches by topic relevance
+            matches = self._filter_matches_by_topic(matches, query)
+            matches = matches[:top_k]
         if not matches:
-            doc_type_label = doc_type or (debug_info.get("doc_type") if debug_info else "longshore")
+            # Handle doc_type for no matches case
+            if doc_types and len(doc_types) > 1:
+                doc_type_label = "all"
+                doc_labels = []
+                type_label_map = {
+                    "walking_bosses": "Walking Bosses and Foremen",
+                    "clerks": "Clerks",
+                    "longshore": "Longshore",
+                }
+                for dt in doc_types:
+                    doc_labels.append(type_label_map.get(dt, dt.title()))
+                opening_text = f"Key findings from the {', '.join(doc_labels)} contracts regarding \"{re.sub(r'\\s+', ' ', query.strip())}\":"
+            else:
+                doc_type_label = doc_type or (debug_info.get("doc_type") if debug_info else "longshore")
+                opening_text = self._craft_opening_text(query, doc_type_label)
+            
             if debug_info is not None:
                 debug_info["retrieved_sources"] = []
                 debug_info["note"] = "No matches from vector search"
@@ -527,19 +882,22 @@ class ContractInsightsEngine:
                 "response_type": "contract_knowledge",
                 "content": "No relevant contract passages were located in the indexed agreements.",
                 "answer_points": [],
-                "disclaimer": "Consult the official ILWU/PMA agreements for definitive guidance.",
+                "tables": [],
+                "disclaimer": "Please refer to exact contract text for detailed understanding.",
                 "sources": [],
                 "matches": [],
                 "total_matches": 0,
-                "opening": self._craft_opening_text(query, doc_type_label),
+                "opening": opening_text,
                 "doc_type": doc_type_label,
             }
 
         sources = self._build_source_entries(matches)
-        answer_points, disclaimer = self._synthesize_contract_answer(query, matches, sources)
+        answer_points, disclaimer, tables = self._synthesize_contract_answer(query, matches, sources, mode=mode)
         content = self._assemble_contract_content(answer_points, disclaimer, sources)
 
         if debug_info is not None:
+            # Use top_k sources for debug info
+            sources_limit = top_k
             debug_info["retrieved_sources"] = [
                 {
                     "source": src.get("source"),
@@ -550,7 +908,7 @@ class ContractInsightsEngine:
                     "page": src.get("page"),
                     "score": src.get("score"),
                 }
-                for src in sources[: top_k]
+                for src in sources[:sources_limit]
             ]
             self.logger.info(
                 "Vector matches | count=%d | details=%s",
@@ -558,15 +916,29 @@ class ContractInsightsEngine:
                 debug_info["retrieved_sources"],
             )
 
-        doc_type_for_opening = doc_type or (debug_info.get("doc_type") if debug_info else "longshore")
-        opening_text = self._craft_opening_text(query, doc_type_for_opening)
+        # Handle opening text for multiple doc types
+        if doc_types and len(doc_types) > 1:
+            doc_labels = []
+            type_label_map = {
+                "walking_bosses": "Walking Bosses and Foremen",
+                "clerks": "Clerks",
+                "longshore": "Longshore",
+            }
+            for dt in doc_types:
+                doc_labels.append(type_label_map.get(dt, dt.title()))
+            opening_text = f"Key findings from the {', '.join(doc_labels)} contracts regarding \"{re.sub(r'\\s+', ' ', query.strip())}\":"
+            doc_type_for_opening = "all"  # Multiple types
+        else:
+            doc_type_for_opening = doc_type or (debug_info.get("doc_type") if debug_info else "longshore")
+            opening_text = self._craft_opening_text(query, doc_type_for_opening)
 
         return {
             "response_type": "contract_knowledge",
             "content": content,
             "answer_points": answer_points,
             "disclaimer": disclaimer,
-            "sources": sources[:5],
+            "sources": sources[:5],  # Both modes use top 5 sources
+            "tables": tables,  # Add tables to response
             "matches": matches,
             "total_matches": len(matches),
             "opening": opening_text,
@@ -615,12 +987,17 @@ class ContractInsightsEngine:
         query: str,
         matches: List[Dict[str, Any]],
         sources: List[Dict[str, Any]],
-    ) -> Tuple[List[str], str]:
-        default_disclaimer = "This summary is informational. Refer to the ILWU/PMA agreements for the authoritative language."
+        mode: str = "llama",
+    ) -> Tuple[List[str], str, List[Dict[str, Any]]]:
+        default_disclaimer = "Please refer to exact contract text for detailed understanding."
         answer_points: List[str] = []
+        tables: List[Dict[str, Any]] = []
         disclaimer = self._normalize_disclaimer(default_disclaimer)
 
-        if self.llama.available():
+        llm_client = self._get_llm_client(mode)
+        api_name = "OpenAI" if mode == "openai" else "Llama"
+        self.logger.info(f"[Contract Synthesis] Using {api_name} API to synthesize answer from {len(sources)} sources")
+        if llm_client.available():
             # Pre-clean excerpts before sending to LLM
             cleaned_sources = []
             for src in sources:
@@ -636,28 +1013,54 @@ class ContractInsightsEngine:
                 "JSON schema:\n"
                 "{\n"
                 '  "answer": ["First clear bullet point", "Second clear bullet point", "..."],\n'
-                '  "disclaimer": "Single sentence reminder"\n'
+                '  "tables": [{"headers": ["Column1", "Column2"], "rows": [["Value1", "Value2"], ["Value3", "Value4"]]}],  // OPTIONAL: Use for structured data like holiday lists, benefit schedules, etc.\n'
+                '  "disclaimer": "Please refer to exact contract text for detailed understanding."\n'
                 "}\n\n"
+                "TABULATION RULES:\n"
+                "- If the question asks for lists, schedules, or tabular data (e.g., 'holiday list', 'vacation schedule', 'benefits'), use the 'tables' field\n"
+                "- Each table should have 'headers' (array of column names) and 'rows' (array of arrays, where each inner array is a row)\n"
+                "- Example for holidays: {\"headers\": [\"Holiday\", \"Date/Details\"], \"rows\": [[\"New Year's Day\", \"January 1\"], [\"Martin Luther King's Day\", \"Third Monday in January\"]]}\n"
+                "- Still include relevant bullets in 'answer' for context, but use tables for structured lists\n"
+                "- Tables are OPTIONAL - only use when data is clearly tabular\n\n"
                 "CRITICAL RULES for answer bullets:\n"
                 "1. Write in plain, professional language - explain what the contract says in simple terms\n"
                 "2. Each bullet should be 1-2 sentences and directly answer the question\n"
-                "3. ALWAYS start each bullet with a CAPITALIZED first word\n"
-                "4. DO NOT copy raw text from clauses - SUMMARIZE and EXPLAIN the meaning\n"
-                "5. ONLY USE SOURCES THAT DIRECTLY ANSWER THE QUESTION - Ignore irrelevant sources\n"
-                "   - If asked about holidays, ONLY use holiday-related sources\n"
-                "   - If asked about vacations, ONLY use vacation-related sources\n"
+                "3. CRITICAL: Each bullet MUST be at least 10 words long - provide complete, detailed information\n"
+                "   - DO NOT include section headings, titles, or incomplete phrases like 'Computation of vacations.' or 'Additional vacation.'\n"
+                "   - Each bullet must be a complete, meaningful sentence or sentences that fully explain the concept\n"
+                "   - If you find headings or short phrases in the sources, expand them into full explanations\n"
+                "4. ALWAYS start each bullet with a CAPITALIZED first word\n"
+                "5. DO NOT copy raw text from clauses - SUMMARIZE and EXPLAIN the meaning in your own words\n"
+                "   - Transform legal language into clear, actionable information\n"
+                "   - Focus on the practical implications for workers\n"
+                "   - Use simple, direct language that anyone can understand\n"
+                "6. CRITICAL: ONLY USE SOURCES THAT DIRECTLY ANSWER THE QUESTION - Ignore irrelevant sources\n"
+                "   - HOLIDAYS and VACATIONS are DIFFERENT concepts - do NOT confuse them\n"
+                "   - If asked about HOLIDAYS (paid holidays like New Year's Day, Christmas), ONLY use holiday-related sources\n"
+                "   - If asked about VACATIONS (time off with pay based on qualifying hours), ONLY use vacation-related sources\n"
                 "   - If asked about guarantees, ONLY use guarantee-related sources\n"
                 "   - DO NOT include unrelated sections even if they appear in sources\n"
-                "6. DO NOT include:\n"
+                "   - If the question specifically asks for a list of holidays, DO NOT include vacation information\n"
+                "7. DO NOT include:\n"
                 "   - Timestamps, PDF metadata, long clause ID lists\n"
                 "   - Incomplete sentences, raw contract text, or irrelevant content\n"
                 "   - Hyphenation artifacts (e.g., fix 'combina - tion' to 'combination')\n"
-                "7. End each bullet with a simple citation: (Source: filename, Section X.Y)\n"
-                "   - Use ONLY the main clause ID, not sub-clause IDs or long lists\n"
-                "8. Focus on WHAT the contract says and WHAT it means for workers\n"
-                "9. If the question asks about something specific, ONLY use sources that directly relate to that topic\n\n"
+                "   - Source citations, filenames, section numbers, or any parenthetical references\n"
+                "8. CRITICAL: DO NOT include ANY source citations or references in your answer bullets\n"
+                "   - NO filenames, NO section numbers, NO parenthetical citations\n"
+                "   - Sources will be displayed separately in the UI\n"
+                "   - Just focus on answering the question clearly without any citations\n"
+                "9. Focus on WHAT the contract says and WHAT it means for workers\n"
+                "   - Explain the key points clearly\n"
+                "   - Make it actionable and understandable\n"
+                "10. If the question asks about something specific, ONLY use sources that directly relate to that topic\n"
+                "    - Example: If asked about 'holidays', search for sections about 'paid holidays' or 'holiday schedule', NOT vacation sections\n"
+                "    - Example: If asked about 'vacations', search for sections about 'vacation pay' or 'qualifying hours', NOT holiday sections\n"
+                "11. Group related information together - if multiple sources say similar things, combine them into one clear bullet\n"
+                "12. Prioritize the most important information - lead with the key points\n"
+                "13. If a bullet is too short (less than 10 words), expand it with more context and details from the contract\n\n"
                 "Example of GOOD answer bullet:\n"
-                '"Clerks are entitled to a 2-hour meal period, and if not sent to eat before the second hour begins, they must be paid for the work performed. (Source: Pacific-Coast-Clerks-Contract-Document-2022-2028.pdf, Section 3.3)"\n\n'
+                '"Clerks are entitled to a 2-hour meal period, and if not sent to eat before the second hour begins, they must be paid for the work performed."\n\n'
                 "Example of BAD answer bullet (DO NOT DO THIS):\n"
                 '", the quarter-hour, the half-hour, the three-quarter hour or the even hour and time lost between the designated starting time and time turned to shall be deducted from the guarantee. (Pacific-Coast-Clerks-Contract-Document-2022-2028.pdf (2.4 (2.4,2.41,2.42,2.43,2.44,2.45,2.411,2.431,2.432,2.441,2.442,2.443,2.444,2.445,2.446,2.447,2.448,2.449,2.451,2.452,2.453,2.4441,2.4471,2.4491,2.4492) – HOURS AND SHIFTS))"\n\n'
                 "Only use information from the provided clauses. Do NOT invent information.\n\n"
@@ -666,7 +1069,7 @@ class ContractInsightsEngine:
                 "Now provide your JSON response:"
             )
             try:
-                raw_response = self.llama.generate(prompt, stream=True)
+                raw_response = llm_client.generate(prompt, stream=True)
                 json_payload = self._parse_llama_json(raw_response)
                 if json_payload:
                     data = json_payload
@@ -677,8 +1080,23 @@ class ContractInsightsEngine:
                     answer_points = []
                     for point in raw_points:
                         cleaned = self._clean_answer_point(point)
+                        # Ensure each bullet is at least 10 words long
                         if cleaned:
-                            answer_points.append(cleaned)
+                            word_count = len(cleaned.split())
+                            if word_count >= 10:
+                                answer_points.append(cleaned)
+                            else:
+                                self.logger.debug(f"Filtered out short bullet ({word_count} words): {cleaned[:100]}")
+                    # Extract tables if present
+                    tables_data = data.get("tables", [])
+                    if isinstance(tables_data, list):
+                        # Validate table structure
+                        validated_tables = []
+                        for table in tables_data:
+                            if isinstance(table, dict) and "headers" in table and "rows" in table:
+                                if isinstance(table["headers"], list) and isinstance(table["rows"], list):
+                                    validated_tables.append(table)
+                        tables = validated_tables
                     disc = data.get("disclaimer")
                     if isinstance(disc, str) and disc.strip():
                         disclaimer = self._normalize_disclaimer(disc.strip())
@@ -702,27 +1120,62 @@ class ContractInsightsEngine:
                             "JSON schema:\n"
                             "{\n"
                             '  "answer": ["First clear bullet point", "Second clear bullet point", "..."],\n'
-                            '  "disclaimer": "Single sentence reminder"\n'
+                            '  "tables": [{"headers": ["Column1", "Column2"], "rows": [["Value1", "Value2"], ["Value3", "Value4"]]}],  // OPTIONAL: Use for structured data like holiday lists, benefit schedules, etc.\n'
+                            '  "disclaimer": "Please refer to exact contract text for detailed understanding."\n'
                             "}\n\n"
+                            "TABULATION RULES:\n"
+                            "- If the question asks for lists, schedules, or tabular data (e.g., 'holiday list', 'vacation schedule', 'benefits'), use the 'tables' field\n"
+                            "- Each table should have 'headers' (array of column names) and 'rows' (array of arrays, where each inner array is a row)\n"
+                            "- Example for holidays: {\"headers\": [\"Holiday\", \"Date/Details\"], \"rows\": [[\"New Year's Day\", \"January 1\"], [\"Martin Luther King's Day\", \"Third Monday in January\"]]}\n"
+                            "- Still include relevant bullets in 'answer' for context, but use tables for structured lists\n"
+                            "- Tables are OPTIONAL - only use when data is clearly tabular\n\n"
                             "CRITICAL RULES for answer bullets:\n"
                             "1. Write in plain, professional language - explain what the contract says in simple terms\n"
                             "2. Each bullet should be 1-2 sentences and directly answer the question\n"
-                            "3. ALWAYS start each bullet with a CAPITALIZED first word\n"
-                            "4. DO NOT copy raw text from clauses - SUMMARIZE and EXPLAIN the meaning\n"
-                            "5. ONLY USE SOURCES THAT DIRECTLY ANSWER THE QUESTION - Ignore irrelevant sources\n"
-                            "6. DO NOT include:\n"
+                            "3. CRITICAL: Each bullet MUST be at least 10 words long - provide complete, detailed information\n"
+                            "   - DO NOT include section headings, titles, or incomplete phrases like 'Computation of vacations.' or 'Additional vacation.'\n"
+                            "   - Each bullet must be a complete, meaningful sentence or sentences that fully explain the concept\n"
+                            "   - If you find headings or short phrases in the sources, expand them into full explanations\n"
+                            "4. ALWAYS start each bullet with a CAPITALIZED first word\n"
+                            "5. DO NOT copy raw text from clauses - SUMMARIZE and EXPLAIN the meaning in your own words\n"
+                            "   - Transform legal language into clear, actionable information\n"
+                            "   - Focus on the practical implications for workers\n"
+                            "   - Use simple, direct language that anyone can understand\n"
+                            "6. CRITICAL: ONLY USE SOURCES THAT DIRECTLY ANSWER THE QUESTION - Ignore irrelevant sources\n"
+                            "   - HOLIDAYS and VACATIONS are DIFFERENT concepts - do NOT confuse them\n"
+                            "   - If asked about HOLIDAYS (paid holidays like New Year's Day, Christmas), ONLY use holiday-related sources\n"
+                            "   - If asked about VACATIONS (time off with pay based on qualifying hours), ONLY use vacation-related sources\n"
+                            "   - If asked about guarantees, ONLY use guarantee-related sources\n"
+                            "   - DO NOT include unrelated sections even if they appear in sources\n"
+                            "   - If the question specifically asks for a list of holidays, DO NOT include vacation information\n"
+                            "7. DO NOT include:\n"
                             "   - Timestamps, PDF metadata, long clause ID lists\n"
                             "   - Incomplete sentences, raw contract text, or irrelevant content\n"
                             "   - Hyphenation artifacts (e.g., fix 'combina - tion' to 'combination')\n"
-                            "7. End each bullet with a simple citation: (Source: filename, Section X.Y)\n"
-                            "   - Use ONLY the main clause ID, not sub-clause IDs or long lists\n"
-                            "8. Focus on WHAT the contract says and WHAT it means for workers\n"
-                            "9. If the question asks about something specific, ONLY use sources that directly relate to that topic\n\n"
+                            "   - Source citations, filenames, section numbers, or any parenthetical references\n"
+                            "8. CRITICAL: DO NOT include ANY source citations or references in your answer bullets\n"
+                            "   - NO filenames, NO section numbers, NO parenthetical citations\n"
+                            "   - Sources will be displayed separately in the UI\n"
+                            "   - Just focus on answering the question clearly without any citations\n"
+                            "9. Focus on WHAT the contract says and WHAT it means for workers\n"
+                            "   - Explain the key points clearly\n"
+                            "   - Make it actionable and understandable\n"
+                            "10. If the question asks about something specific, ONLY use sources that directly relate to that topic\n"
+                            "    - Example: If asked about 'holidays', search for sections about 'paid holidays' or 'holiday schedule', NOT vacation sections\n"
+                            "    - Example: If asked about 'vacations', search for sections about 'vacation pay' or 'qualifying hours', NOT holiday sections\n"
+                            "11. Group related information together - if multiple sources say similar things, combine them into one clear bullet\n"
+                            "12. Prioritize the most important information - lead with the key points\n"
+                            "13. If a bullet is too short (less than 10 words), expand it with more context and details from the contract\n\n"
+                            "Example of GOOD answer bullet:\n"
+                            '"Clerks are entitled to a 2-hour meal period, and if not sent to eat before the second hour begins, they must be paid for the work performed."\n\n'
+                            "Example of BAD answer bullet (DO NOT DO THIS):\n"
+                            '", the quarter-hour, the half-hour, the three-quarter hour or the even hour and time lost between the designated starting time and time turned to shall be deducted from the guarantee. (Pacific-Coast-Clerks-Contract-Document-2022-2028.pdf (2.4 (2.4,2.41,2.42,2.43,2.44,2.45,2.411,2.431,2.432,2.441,2.442,2.443,2.444,2.445,2.446,2.447,2.448,2.449,2.451,2.452,2.453,2.4441,2.4471,2.4491,2.4492) – HOURS AND SHIFTS))"\n\n'
+                            "Only use information from the provided clauses. Do NOT invent information.\n\n"
                             f"User Question: {query}\n\n"
                             f"Relevant Clauses:\n{retry_context}\n\n"
                             "Now provide your JSON response:"
                         )
-                        retry_response = self.llama.generate(
+                        retry_response = llm_client.generate(
                             retry_prompt,
                             timeout=max(20, Config.LLAMA_TIMEOUT // 2),
                             stream=True,
@@ -738,8 +1191,24 @@ class ContractInsightsEngine:
                             answer_points = []
                             for point in raw_points:
                                 cleaned = self._clean_answer_point(point)
+                                # Ensure each bullet is at least 10 words long
                                 if cleaned:
-                                    answer_points.append(cleaned)
+                                    word_count = len(cleaned.split())
+                                    if word_count >= 10:
+                                        answer_points.append(cleaned)
+                                    else:
+                                        self.logger.debug(f"Filtered out short bullet ({word_count} words): {cleaned[:100]}")
+                            # Extract tables if present from retry
+                            retry_tables_data = retry_data.get("tables", [])
+                            if isinstance(retry_tables_data, list):
+                                # Validate table structure
+                                validated_retry_tables = []
+                                for table in retry_tables_data:
+                                    if isinstance(table, dict) and "headers" in table and "rows" in table:
+                                        if isinstance(table["headers"], list) and isinstance(table["rows"], list):
+                                            validated_retry_tables.append(table)
+                                if validated_retry_tables:
+                                    tables = validated_retry_tables
                             disc = retry_data.get("disclaimer")
                             if isinstance(disc, str) and disc.strip():
                                 disclaimer = self._normalize_disclaimer(disc.strip())
@@ -748,29 +1217,40 @@ class ContractInsightsEngine:
 
         if not answer_points:
             heuristic_points = self._build_fallback_summary(query, sources)
-            answer_points.extend(heuristic_points)
+            # Validate and filter fallback bullets (must be at least 10 words)
+            for point in heuristic_points:
+                cleaned = self._clean_answer_point(point)
+                if cleaned:
+                    word_count = len(cleaned.split())
+                    if word_count >= 10:
+                        answer_points.append(cleaned)
+                    else:
+                        self.logger.debug(f"Filtered out short fallback bullet ({word_count} words): {cleaned[:100]}")
 
         if not answer_points:
+            # Extract excerpts but ensure they're at least 10 words
             for src in sources[:4]:
                 excerpt = src.get("excerpt", "")
                 if excerpt:
-                    answer_points.append(excerpt.replace("\n", " ").strip()[:240])
+                    cleaned_excerpt = self._clean_excerpt_for_llm(excerpt)
+                    cleaned = self._clean_answer_point(cleaned_excerpt[:240])
+                    if cleaned:
+                        word_count = len(cleaned.split())
+                        if word_count >= 10:
+                            answer_points.append(cleaned)
         if not answer_points:
             answer_points = ["No synthesized answer available from the retrieved clauses."]
 
-        return answer_points, disclaimer
+        return answer_points, disclaimer, tables
 
     def _assemble_contract_content(
         self, answer_points: List[str], disclaimer: str, sources: List[Dict[str, Any]]
     ) -> str:
+        # Just return the answer points without sources - sources are displayed separately in the UI
         answer_section = "\n".join(f"- {point}" for point in answer_points)
-        source_section = "\n".join(
-            f"- {self._format_source_label(src)}" for src in sources[:5]
-        ) or "- No sources available"
         return (
             f"{answer_section}\n\n"
-            f"Disclaimer: {disclaimer}\n\n"
-            f"Sources:\n{source_section}"
+            f"Disclaimer: {disclaimer}"
         )
 
     @staticmethod
@@ -801,9 +1281,12 @@ class ContractInsightsEngine:
             return f"{source} (page {page})"
         return source
 
-    def _generate_wage_sql(self, question: str) -> Tuple[Optional[str], Dict[str, Any]]:
+    def _generate_wage_sql(self, question: str, mode: str = "llama") -> Tuple[Optional[str], Dict[str, Any]]:
         """Generate SQL and return metadata about the query."""
-        if not self.llama.available():
+        llm_client = self._get_llm_client(mode)
+        api_name = "OpenAI" if mode == "openai" else "Llama"
+        self.logger.info(f"[Wage SQL Generation] Using {api_name} API to generate SQL query")
+        if not llm_client.available():
             return None, {}
 
         schema_desc = self.wage_schema or ""
@@ -877,9 +1360,33 @@ class ContractInsightsEngine:
         if value_context:
             prompt += "\nAdditional context:\n" + "\n".join(f"- {line}" for line in value_context) + "\n"
         prompt += f"\nQuestion: {prepared_question}\n\nSQL:"
-        raw_sql = self.llama.generate(prompt, stream=True)
-        sql = self._extract_sql_statement(raw_sql)
-        return sql, metadata
+        
+        try:
+            self.logger.debug(f"[Wage SQL Generation] Prompt length: {len(prompt)} characters")
+            raw_sql = llm_client.generate(prompt, stream=True)
+            self.logger.debug(f"[Wage SQL Generation] Raw LLM response length: {len(raw_sql)} characters")
+            self.logger.debug(f"[Wage SQL Generation] Raw LLM response (first 500 chars): {raw_sql[:500]}")
+            
+            if not raw_sql or not raw_sql.strip():
+                self.logger.warning("[Wage SQL Generation] LLM returned empty response")
+                return None, metadata
+            
+            sql = self._extract_sql_statement(raw_sql)
+            if not sql:
+                self.logger.warning(
+                    "[Wage SQL Generation] Failed to extract SQL from LLM response. "
+                    f"Response (first 500 chars): {raw_sql[:500]}"
+                )
+                return None, metadata
+            
+            self.logger.info(f"[Wage SQL Generation] Successfully extracted SQL: {sql[:200]}...")
+            return sql, metadata
+        except Exception as exc:
+            self.logger.error(
+                f"[Wage SQL Generation] Exception during SQL generation: {exc}",
+                exc_info=True
+            )
+            return None, metadata
 
     def _prepare_wage_question(self, question: str) -> Tuple[str, Dict[str, Any]]:
         """Prepare question with default filters and return metadata about shift mentions."""
@@ -1099,7 +1606,7 @@ class ContractInsightsEngine:
         
         return sql
 
-    def _answer_wage_schedule(self, query: str, debug_info: Dict[str, Any]) -> Dict[str, Any]:
+    def _answer_wage_schedule(self, query: str, debug_info: Dict[str, Any], mode: str = "llama") -> Dict[str, Any]:
         if not self.wage_db_conn or not self.wage_schema:
             message = "Wage schedule data is not currently available."
             debug_info["wage_sql"] = None
@@ -1116,11 +1623,15 @@ class ContractInsightsEngine:
                 "opening": f"Wage schedule details for '{query}'",
             }
 
-        sql_query, query_metadata = self._generate_wage_sql(query)
+        sql_query, query_metadata = self._generate_wage_sql(query, mode=mode)
         if not sql_query:
             message = "I couldn't generate a wage schedule query from that question."
             debug_info["wage_sql"] = None
-            self.logger.warning("Wage schedule SQL generation failed for query: %s", query)
+            debug_info["wage_sql_error"] = "SQL generation returned None - check logs for details"
+            self.logger.warning(
+                "Wage schedule SQL generation failed for query: %s (mode: %s, metadata: %s)",
+                query, mode, query_metadata
+            )
             return {
                 "response_type": "wage_schedule_sql",
                 "content": message,
@@ -1193,10 +1704,24 @@ class ContractInsightsEngine:
                 employee_types = df["EmployeeType"].unique()
                 self.logger.info("Employee types in results: %s", list(employee_types))
         
-        # Generate summary points for answer - just min/max
+        # Detect if this is an analytical question that needs LLM summarization
+        is_analytical = self._is_analytical_wage_question(query)
+        
+        # Generate summary points - use LLM for analytical questions, min/max for simple queries
+        analysis_tables: List[Dict[str, Any]] = []
         if df.empty:
             summary_points: List[str] = ["No wage records matched the filters."]
+        elif is_analytical:
+            # Use LLM to generate analytical insights
+            summary_points, llm_tables = self._synthesize_wage_analysis(query, df, mode=mode)
+            # If LLM fails, fall back to min/max
+            if not summary_points:
+                summary_points = self._build_wage_summary_min_max(df, query)
+            else:
+                # Use LLM-generated tables if available, otherwise generate default tables
+                analysis_tables = llm_tables if llm_tables else self._generate_wage_analysis_tables(df, query)
         else:
+            # Simple queries just get min/max summary
             summary_points = self._build_wage_summary_min_max(df, query)
         
         # Create opening message
@@ -1274,7 +1799,8 @@ class ContractInsightsEngine:
             "sources": [],
             "total_matches": len(df),
             "answer_points": summary_points,
-            "disclaimer": None,
+            "tables": analysis_tables if analysis_tables else [],  # Add analytical summary tables
+            "disclaimer": "Please refer to exact contract text for detailed understanding.",
             "opening": opening,
         }
         
@@ -1363,6 +1889,226 @@ class ContractInsightsEngine:
 
         return summary
 
+    def _is_analytical_wage_question(self, query: str) -> bool:
+        """Check if the query asks for analytical insights like 'which', 'highest', 'lowest', etc."""
+        query_lower = query.lower()
+        analytical_keywords = [
+            "which", "who", "what", "highest", "lowest", "best", "worst",
+            "top", "bottom", "most", "least", "compare", "comparison",
+            "difference", "different", "rank", "ranking", "order by",
+            "maximum", "minimum", "max", "min"
+        ]
+        return any(keyword in query_lower for keyword in analytical_keywords)
+    
+    def _synthesize_wage_analysis(
+        self, 
+        query: str, 
+        df: pd.DataFrame, 
+        mode: str = "llama"
+    ) -> List[str]:
+        """Use LLM to generate analytical insights from wage data. Returns (answer_points, tables)."""
+        if df.empty:
+            return ["No wage records available for analysis."], []
+        
+        llm_client = self._get_llm_client(mode)
+        
+        # Prepare data summary for LLM
+        # Convert DataFrame to a readable format
+        data_summary = df.to_string(index=False, max_rows=50)  # Limit rows for prompt
+        if len(df) > 50:
+            data_summary += f"\n... (showing first 50 of {len(df)} total rows)"
+        
+        # Get column statistics
+        numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+        stats_summary = []
+        for col in numeric_cols[:5]:  # Limit to 5 columns
+            if col != "FiscalYear":  # Skip FiscalYear
+                stats_summary.append(
+                    f"{col}: min={df[col].min():.2f}, max={df[col].max():.2f}, "
+                    f"mean={df[col].mean():.2f}"
+                )
+        
+        # Group by key dimensions for insights
+        insights = []
+        if "EmployeeType" in df.columns:
+            by_employee = df.groupby("EmployeeType")[numeric_cols[0] if numeric_cols else df.columns[0]].mean().sort_values(ascending=False)
+            insights.append(f"Average rates by EmployeeType: {dict(by_employee.head(5))}")
+        
+        if "SkillType" in df.columns:
+            by_skill = df.groupby("SkillType")[numeric_cols[0] if numeric_cols else df.columns[0]].mean().sort_values(ascending=False)
+            insights.append(f"Average rates by SkillType: {dict(by_skill.head(5))}")
+        
+        # Find highest/lowest values
+        if numeric_cols:
+            for col in numeric_cols[:3]:  # Check first 3 numeric columns
+                if col not in ["FiscalYear"]:
+                    max_idx = df[col].idxmax()
+                    min_idx = df[col].idxmin()
+                    max_row = df.loc[max_idx]
+                    min_row = df.loc[min_idx]
+                    insights.append(f"Highest {col}: {df[col].max():.2f} (EmployeeType={max_row.get('EmployeeType', 'N/A')}, SkillType={max_row.get('SkillType', 'N/A')})")
+                    insights.append(f"Lowest {col}: {df[col].min():.2f} (EmployeeType={min_row.get('EmployeeType', 'N/A')}, SkillType={min_row.get('SkillType', 'N/A')})")
+        
+        prompt = (
+            "You are analyzing wage schedule data. Answer the user's question based on the data provided.\n\n"
+            f"User Question: {query}\n\n"
+            "Data Summary:\n"
+            f"{data_summary}\n\n"
+            "Key Statistics:\n"
+            f"{chr(10).join(stats_summary)}\n\n"
+            "Data Insights:\n"
+            f"{chr(10).join(insights)}\n\n"
+            "IMPORTANT: Return a JSON object with this structure:\n"
+            "{\n"
+            '  "answer": ["First bullet point answering the question", "Second bullet point", ...],\n'
+            '  "tables": [{"headers": ["Column1", "Column2"], "rows": [["Value1", "Value2"]]}]  // OPTIONAL: Use for summary tables\n'
+            "}\n\n"
+            "RULES:\n"
+            "1. Answer the question directly and clearly\n"
+            "2. Use specific numbers from the data (min, max, averages)\n"
+            "3. Identify which EmployeeType and SkillType have the highest/lowest values if asked\n"
+            "4. Compare different categories if the question asks for comparisons\n"
+            "5. Each bullet should be at least 10 words long\n"
+            "6. If the question asks 'which' or 'what', provide specific answers with values\n"
+            "7. Use the 'tables' field for summary comparisons (e.g., top 5 by category)\n"
+            "8. Be concise but informative\n"
+            "9. Return ONLY valid JSON, no other text\n"
+            "10. CRITICAL: When discussing growth rates, trends, or changes over time, use forward-looking language:\n"
+            "    - Use 'will increase', 'will decrease', 'is projected to', 'likely to increase', 'expected to grow'\n"
+            "    - Instead of past tense like 'increased from', 'was', 'reached', use future/conditional language\n"
+            "    - Example: 'The salary will increase from 36.64 in 2022 to 43.84 in 2027' instead of 'increased from'\n"
+            "    - Example: 'This represents a growth rate of approximately 19.5% over the five-year period' is fine\n"
+            "    - For growth rate questions, frame it as: 'The growth rate will be approximately X%' or 'is expected to be X%'\n"
+        )
+        
+        try:
+            self.logger.info(f"[Wage Analysis] Generating LLM analysis for analytical question: {query[:100]}...")
+            response = llm_client.generate(prompt, timeout=60)
+            
+            # Extract JSON from response
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if json_match:
+                data = json.loads(json_match.group(0))
+                answer_points = data.get("answer", [])
+                tables = data.get("tables", [])
+                
+                # Validate answer points
+                validated_points = []
+                for point in answer_points:
+                    if isinstance(point, str) and len(point.strip().split()) >= 10:
+                        validated_points.append(point.strip())
+                
+                # Validate and clean tables
+                validated_tables = []
+                if isinstance(tables, list):
+                    for table in tables:
+                        if isinstance(table, dict) and "headers" in table and "rows" in table:
+                            if isinstance(table["headers"], list) and isinstance(table["rows"], list):
+                                validated_tables.append(table)
+                
+                if validated_points:
+                    self.logger.info(f"[Wage Analysis] Generated {len(validated_points)} answer points and {len(validated_tables)} tables from LLM")
+                    return validated_points, validated_tables
+                else:
+                    self.logger.warning("[Wage Analysis] LLM response had no valid answer points")
+                    return [], []
+            else:
+                self.logger.warning("[Wage Analysis] Could not extract JSON from LLM response")
+                return [], []
+                
+        except Exception as exc:
+            self.logger.error(f"[Wage Analysis] Error generating analysis: {exc}", exc_info=True)
+            return [], []
+    
+    def _generate_wage_analysis_tables(self, df: pd.DataFrame, query: str) -> List[Dict[str, Any]]:
+        """Generate summary tables for analytical wage questions."""
+        tables: List[Dict[str, Any]] = []
+        query_lower = query.lower()
+        
+        # Check if query asks for rankings or comparisons
+        is_ranking = any(kw in query_lower for kw in ["which", "highest", "top", "most", "best", "rank"])
+        is_comparison = any(kw in query_lower for kw in ["compare", "difference", "different"])
+        
+        if not is_ranking and not is_comparison:
+            return tables
+        
+        numeric_cols = [col for col in df.columns if df[col].dtype in ("float64", "int64") and col != "FiscalYear"]
+        if not numeric_cols:
+            return tables
+        
+        focus_col = numeric_cols[0]  # Use first numeric column (typically a shift column)
+        
+        # Table 1: Top EmployeeType and SkillType combinations by rate
+        if "EmployeeType" in df.columns and "SkillType" in df.columns:
+            top_combinations = (
+                df.groupby(["EmployeeType", "SkillType"])[focus_col]
+                .mean()
+                .sort_values(ascending=False)
+                .head(10)
+                .reset_index()
+            )
+            
+            if not top_combinations.empty:
+                tables.append({
+                    "headers": ["Employee Type", "Skill Type", f"Average {focus_col}"],
+                    "rows": [
+                        [
+                            str(row["EmployeeType"]),
+                            str(row["SkillType"]),
+                            f"{row[focus_col]:.2f}"
+                        ]
+                        for _, row in top_combinations.iterrows()
+                    ]
+                })
+        
+        # Table 2: By EmployeeType
+        if "EmployeeType" in df.columns:
+            by_employee = (
+                df.groupby("EmployeeType")[focus_col]
+                .agg(["mean", "max", "min"])
+                .sort_values("mean", ascending=False)
+                .reset_index()
+            )
+            
+            if not by_employee.empty:
+                tables.append({
+                    "headers": ["Employee Type", "Average", "Maximum", "Minimum"],
+                    "rows": [
+                        [
+                            str(row["EmployeeType"]),
+                            f"{row['mean']:.2f}",
+                            f"{row['max']:.2f}",
+                            f"{row['min']:.2f}"
+                        ]
+                        for _, row in by_employee.iterrows()
+                    ]
+                })
+        
+        # Table 3: By SkillType
+        if "SkillType" in df.columns:
+            by_skill = (
+                df.groupby("SkillType")[focus_col]
+                .agg(["mean", "max", "min"])
+                .sort_values("mean", ascending=False)
+                .reset_index()
+            )
+            
+            if not by_skill.empty:
+                tables.append({
+                    "headers": ["Skill Type", "Average", "Maximum", "Minimum"],
+                    "rows": [
+                        [
+                            str(row["SkillType"]),
+                            f"{row['mean']:.2f}",
+                            f"{row['max']:.2f}",
+                            f"{row['min']:.2f}"
+                        ]
+                        for _, row in by_skill.iterrows()
+                    ]
+                })
+        
+        return tables
+    
     def _build_wage_summary_min_max(self, df: pd.DataFrame, question: str) -> List[str]:
         """Build simplified summary with only min/max values and percentage increase if applicable."""
         summary: List[str] = []
@@ -1595,6 +2341,11 @@ class ContractInsightsEngine:
         if not text:
             return ""
         
+        # Remove ALL PCCCD.indd patterns (comprehensive removal - must be first)
+        # Matches any variation: "PCCCD.indd", "2022 PCCCD.indd", "PCCCD.indd 30", "2022PCCCD.indd", etc.
+        text = re.sub(r"\d*\s*PCCCD\.indd\s*\d*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"[Pp][Cc]{2}[Dd]\.indd", "", text)  # Catch any remaining variations
+        
         # Remove PDF metadata timestamps (e.g., "2022 PCCCD.indd   142022 PCCCD.indd   14 10/11/24   2:41 PM10/11/24   2:41 PM")
         text = re.sub(r"\d{4}\s+PCCCD\.indd\s+\d+.*?(?:\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}\s*[AP]M)+", "", text)
         
@@ -1618,6 +2369,11 @@ class ContractInsightsEngine:
         """Clean up answer points by removing timestamps, long clause ID lists, and formatting artifacts."""
         if not text:
             return ""
+        
+        # Remove ALL PCCCD.indd patterns (comprehensive removal - must be first)
+        # Matches any variation: "PCCCD.indd", "2022 PCCCD.indd", "PCCCD.indd 30", "2022PCCCD.indd", etc.
+        text = re.sub(r"\d*\s*PCCCD\.indd\s*\d*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"[Pp][Cc]{2}[Dd]\.indd", "", text)  # Catch any remaining variations
         
         # Remove PDF metadata timestamps (e.g., "2022 PCCCD.indd   142022 PCCCD.indd   14 10/11/24   2:41 PM10/11/24   2:41 PM")
         text = re.sub(r"\d{4}\s+PCCCD\.indd\s+\d+.*?(?:\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}\s*[AP]M)+", "", text)
@@ -1647,6 +2403,24 @@ class ContractInsightsEngine:
         # Remove "– TITLE" patterns from citations (e.g., "– HOURS AND SHIFTS")
         text = re.sub(r"\(([^)]+)–\s*[A-Z\s]+\)", r"(\1)", text)
         
+        # Remove source citations like "(Pacific_Coast_...pdf (6.2...))" or "(Source: ...)"
+        # Pattern: "(filename (section) – title)" or "(Source: filename, Section X.Y)"
+        # More comprehensive patterns to catch all variations
+        
+        # Remove citations like "(Pacific-Coast-Clerks-Contract-Document-2022-2028.pdf (8.5 – DISPATCHING, REGISTRATION, AND PREFERENCE))"
+        text = re.sub(r"\([^)]*[Pp]acific[^)]*\.pdf[^)]*\)", "", text)
+        text = re.sub(r"\([^)]*\.pdf[^)]*\)", "", text)  # Catch any .pdf in parentheses
+        text = re.sub(r"\(Source:\s*[^)]+\)", "", text, flags=re.IGNORECASE)
+        # Remove nested parentheses patterns like "(filename (section – title))"
+        text = re.sub(r"\([^)]*\([^)]*–[^)]*\)[^)]*\)", "", text)
+        # Remove patterns with section numbers and titles: "(filename (8.5 – TITLE))"
+        text = re.sub(r"\([^)]*\d+\.\d+\s*–\s*[A-Z\s]+\)", "", text)
+        # Remove any remaining parenthetical citations that might contain contract references
+        text = re.sub(r"\([^)]*[Cc]ontract[^)]*\)", "", text)
+        text = re.sub(r"\([^)]*[Cc]lerks[^)]*\)", "", text)
+        text = re.sub(r"\([^)]*[Ll]ongshore[^)]*\)", "", text)
+        text = re.sub(r"\([^)]*[Ww]alking[^)]*\)", "", text)
+        
         # Fix hyphenation artifacts (e.g., "combina - tion" -> "combination")
         # Pattern: word part, space, hyphen, space, word continuation
         text = re.sub(r"(\w+)\s+-\s+(\w+)", r"\1\2", text)
@@ -1658,8 +2432,12 @@ class ContractInsightsEngine:
         # Remove excessive whitespace
         text = re.sub(r"\s+", " ", text)
         
+        # Remove trailing closing parentheses that might be left after citation removal
+        text = re.sub(r"\s*\)+\s*$", "", text)
+        text = re.sub(r"\s+\)\s*$", "", text)
+        
         # Remove leading/trailing punctuation artifacts
-        text = text.strip(".,;: ")
+        text = text.strip(".,;: )")
         
         # Capitalize the first letter of the sentence
         if text:
@@ -1676,12 +2454,35 @@ class ContractInsightsEngine:
         return text.strip()
 
     def _infer_doc_type(self, query: str) -> str:
+        """Infer a single document type from query. Returns the first match."""
+        doc_types = self._infer_doc_types(query)
+        return doc_types[0] if doc_types else "longshore"
+
+    def _infer_doc_types(self, query: str) -> List[str]:
+        """
+        Infer document types from query. Returns list of types to search.
+        Returns empty list or ['longshore', 'clerks', 'walking_bosses'] if none specified.
+        """
         lower = query.lower()
+        types_found = []
+        
+        # Check for walking bosses/foremen
         if any(term in lower for term in ["walking boss", "walking bosses", "foremen", "foreman"]):
-            return "walking_bosses"
+            types_found.append("walking_bosses")
+        
+        # Check for clerks
         if "clerk" in lower:
-            return "clerks"
-        return "longshore"
+            types_found.append("clerks")
+        
+        # Check for longshoremen/longshore
+        if any(term in lower for term in ["longshore", "longshoremen", "longshoreman"]):
+            types_found.append("longshore")
+        
+        # If nothing found, search all types
+        if not types_found:
+            return ["longshore", "clerks", "walking_bosses"]
+        
+        return types_found
 
     def _craft_opening_text(self, query: str, doc_type: str) -> str:
         doc_label_map = {
@@ -1747,8 +2548,11 @@ class ContractInsightsEngine:
 
         return bullets[:5]
 
-    def _answer_with_generic_llm(self, query: str) -> Dict[str, Any]:
-        if not self.llama.available():
+    def _answer_with_generic_llm(self, query: str, mode: str = "llama") -> Dict[str, Any]:
+        llm_client = self._get_llm_client(mode)
+        api_name = "OpenAI" if mode == "openai" else "Llama"
+        self.logger.info(f"[Generic Knowledge] Using {api_name} API to generate response")
+        if not llm_client.available():
             return {
                 "response_type": "generic_llm",
                 "content": (
@@ -1771,7 +2575,7 @@ class ContractInsightsEngine:
             "If the question might need contract-specific nuances, advise consulting the agreements.\n\n"
             f"Question: {query}"
         )
-        content = self.llama.generate(prompt, timeout=45, stream=True)
+        content = llm_client.generate(prompt, timeout=45, stream=True)
         return {
             "response_type": "generic_llm",
             "content": content,
@@ -1785,13 +2589,16 @@ class ContractInsightsEngine:
             "total_matches": 0,
         }
 
-    def _answer_off_topic(self, query: str) -> Dict[str, Any]:
+    def _answer_off_topic(self, query: str, mode: str = "llama") -> Dict[str, Any]:
         disclaimer = (
             "I'm tuned for ILWU/PMA maritime agreements. The question seems outside that scope, "
             "but here's a brief response. Please verify details from appropriate sources."
         )
 
-        if not self.llama.available():
+        llm_client = self._get_llm_client(mode)
+        api_name = "OpenAI" if mode == "openai" else "Llama"
+        self.logger.info(f"[Off-Topic] Using {api_name} API to generate response")
+        if not llm_client.available():
             return {
                 "response_type": "off_topic",
                 "content": disclaimer,
@@ -1802,7 +2609,7 @@ class ContractInsightsEngine:
         prompt = (
             f"{disclaimer}\n\nQuestion: {query}\n\nRespond in 2-3 sentences."
         )
-        tail = self.llama.generate(prompt, timeout=30, stream=True)
+        tail = llm_client.generate(prompt, timeout=30, stream=True)
         return {
             "response_type": "off_topic",
             "content": tail,

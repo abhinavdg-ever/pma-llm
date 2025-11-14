@@ -5,7 +5,7 @@ services:
     build: .
     container_name: contracts-copilot
     ports:
-      - "8080:8080"   # external:internal - nginx listens on 8080 internally
+      - "8030:8080"   # external:internal - nginx listens on 8080 internally
     restart: always
     environment:
       # MySQL Configuration
@@ -21,8 +21,9 @@ services:
       - QDRANT_COLLECTION_NAME=contracts
       # Embedding Service Configuration
       - EMBEDDING_API_URL=http://34.131.37.125:8000/embed
-      # OpenAI (optional)
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # OpenAI Configuration
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=gpt-4o-mini
       # Wage schedule database
       - WAGE_DB_HOST=72.60.96.212
       - WAGE_DB_PORT=3306

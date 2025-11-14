@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Bot, User } from "lucide-react";
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as ChartTooltip, Legend, ResponsiveContainer } from "recharts";
 import ReactMarkdown from "react-markdown";
 import {
   Accordion,
@@ -30,6 +30,7 @@ interface SourceEntry {
   excerpt?: string;
   section_heading?: string;
   clause?: string;
+  main_clause_id?: string;
   clause_heading?: string;
 }
 
@@ -45,6 +46,7 @@ interface ChatMessageProps {
   userQuery?: string; // Original user query to detect plot requests
   query_classification?: string; // SQL or Knowledge/General
   answer_points?: string[];
+  tables?: Array<{ headers: string[]; rows: string[][] }> | null;
   disclaimer?: string | null;
   sources?: SourceEntry[] | null;
   opening?: string | null;
@@ -62,6 +64,7 @@ const ChatMessage = ({
   userQuery,
   query_classification,
   answer_points,
+  tables,
   disclaimer,
   sources,
   opening,
@@ -361,13 +364,62 @@ const ChatMessage = ({
                 </p>
               )}
               <ul className="mt-2 space-y-2 text-foreground w-full max-w-full">
-                {answer_points?.map((point, idx) => (
-                  <li key={idx} className="flex gap-2 w-full min-w-0 max-w-full">
-                    <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-primary flex-shrink-0" />
-                    <span className="flex-1 break-words overflow-wrap-anywhere min-w-0">{point}</span>
-                  </li>
-                ))}
+                {answer_points?.map((point, idx) => {
+                  // Strip any remaining source citations from the point text
+                  const cleanPoint = point.replace(/\([^)]*[Pp]acific[^)]*\.pdf[^)]*\)/g, "")
+                    .replace(/\([^)]*\.pdf[^)]*\)/g, "")
+                    .replace(/\([^)]*\d+\.\d+\s*–\s*[A-Z\s]+\)/g, "")
+                    .replace(/\([^)]*\([^)]*–[^)]*\)[^)]*\)/g, "")
+                    .replace(/\s*\)+\s*$/, "") // Remove trailing closing parentheses
+                    .trim();
+                  
+                  return (
+                    <li key={idx} className="flex gap-2 items-start w-full min-w-0 max-w-full">
+                      <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-primary flex-shrink-0" />
+                      <span className="flex-1 break-words overflow-wrap-anywhere min-w-0">{cleanPoint}</span>
+                    </li>
+                  );
+                })}
               </ul>
+              {tables && tables.length > 0 && (
+                <div className="mt-4 space-y-4 w-full max-w-full overflow-x-auto">
+                  {tables.map((table, tableIdx) => (
+                    <div key={tableIdx} className="rounded-lg border border-border bg-background/50 overflow-hidden">
+                      <table className="w-full text-sm border-collapse">
+                        <thead>
+                          <tr className="bg-muted/50 border-b border-border">
+                            {table.headers.map((header, headerIdx) => (
+                              <th
+                                key={headerIdx}
+                                className="px-4 py-2 text-left font-semibold text-foreground border-r border-border last:border-r-0"
+                              >
+                                {header}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {table.rows.map((row, rowIdx) => (
+                            <tr
+                              key={rowIdx}
+                              className={rowIdx % 2 === 0 ? "bg-background" : "bg-muted/20 border-b border-border/50"}
+                            >
+                              {row.map((cell, cellIdx) => (
+                                <td
+                                  key={cellIdx}
+                                  className="px-4 py-2 text-foreground border-r border-border/50 last:border-r-0 break-words overflow-wrap-anywhere"
+                                >
+                                  {cell}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ))}
+                </div>
+              )}
               {disclaimer && (
                 <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm text-muted-foreground break-words overflow-wrap-anywhere">
                   <strong className="font-semibold text-foreground">Disclaimer:</strong> {disclaimer}
@@ -535,7 +587,7 @@ const ChatMessage = ({
                   <YAxis 
                     tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
                   />
-                  <Tooltip 
+                  <ChartTooltip 
                     contentStyle={{ 
                       backgroundColor: 'hsl(var(--card))', 
                       border: '1px solid hsl(var(--border))',
@@ -581,7 +633,7 @@ const ChatMessage = ({
                   <YAxis 
                     tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
                   />
-                  <Tooltip 
+                  <ChartTooltip 
                     contentStyle={{ 
                       backgroundColor: 'hsl(var(--card))', 
                       border: '1px solid hsl(var(--border))',
