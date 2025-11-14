@@ -926,7 +926,9 @@ class ContractInsightsEngine:
             }
             for dt in doc_types:
                 doc_labels.append(type_label_map.get(dt, dt.title()))
-            opening_text = f"Key findings from the {', '.join(doc_labels)} contracts regarding \"{re.sub(r'\\s+', ' ', query.strip())}\":"
+            # Extract regex operation outside f-string (cannot use backslashes in f-string expressions)
+            cleaned_query = re.sub(r'\s+', ' ', query.strip())
+            opening_text = f"Key findings from the {', '.join(doc_labels)} contracts regarding \"{cleaned_query}\":"
             doc_type_for_opening = "all"  # Multiple types
         else:
             doc_type_for_opening = doc_type or (debug_info.get("doc_type") if debug_info else "longshore")
