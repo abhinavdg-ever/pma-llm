@@ -4,14 +4,16 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
+
+# Load environment variables BEFORE importing contract_llm
+# This ensures Config class reads the correct values from .env
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from contract_llm import Config, ContractInsightsEngine
-
-
-load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
