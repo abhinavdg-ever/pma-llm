@@ -1,14 +1,18 @@
-import os
-import re
 import sys
 import uuid
 from pathlib import Path
-from typing import Generator, List, Tuple
+from typing import Generator
 
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, PointStruct
-from pypdf import PdfReader
+
+from parse_contract import (
+    extract_raw_text,
+    clean_text,
+    parse_contract,
+    combine_clauses_by_main,
+)
 
 # ---------------------
 # CONFIGURATION
@@ -36,25 +40,12 @@ if not pdf_folder.exists():
 # CONSTANTS
 # ---------------------
 
-TARGET_CHARS = 900
-SENTENCE_OVERLAP = 1
-SECTION_PATTERN = re.compile(
-    r"^(SECTION\s+[0-9A-Z\-\.]+.*|ARTICLE\s+[0-9A-Z]+.*|APPENDIX\s+[A-Z]+.*)$",
-    re.IGNORECASE,
-)
-SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+CHUNK_SIZE = 500  # characters
+CHUNK_OVERLAP = 100  # characters
 
 # ---------------------
 # HELPERS
 # ---------------------
-
-
-def normalize_whitespace(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def normalize_slug(value: str) -> str:
-    return re.sub(r"[^A-Z0-9]+", " ", value.upper()).strip()
 
 
 def infer_doc_type(filename: str) -> str:
@@ -66,61 +57,20 @@ def infer_doc_type(filename: str) -> str:
     return "longshore"
 
 
-def iter_sections(reader: PdfReader) -> Generator[Tuple[str, int, int, str], None, None]:
-    current_title = "Preface"
-    buffer: List[str] = []
-    section_start = 1
-    last_page = 1
-
-    for page_num, page in enumerate(reader.pages, start=1):
-        raw_text = page.extract_text() or ""
-        lines = [normalize_whitespace(line) for line in raw_text.splitlines()]
-
-        for line in lines:
-            if not line:
-                continue
-            if SECTION_PATTERN.match(line.upper()):
-                if buffer:
-                    yield current_title, section_start, last_page, " ".join(buffer)
-                    buffer = []
-                current_title = line
-                section_start = page_num
-            else:
-                buffer.append(line)
-        last_page = page_num
-
-    if buffer:
-        yield current_title, section_start, last_page, " ".join(buffer)
-
-
-def chunk_section_text(text: str) -> List[str]:
-    sentences = [s.strip() for s in SENTENCE_SPLIT.split(text) if s.strip()]
-    if not sentences:
-        return []
-
-    chunks: List[str] = []
+def iter_char_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> Generator[str, None, None]:
+    """Split text into character-based chunks with overlap."""
+    if not text:
+        return
+    
+    text_len = len(text)
     start = 0
-
-    while start < len(sentences):
-        end = start
-        current_sentences: List[str] = []
-        current_chars = 0
-
-        while end < len(sentences) and (current_chars < TARGET_CHARS or not current_sentences):
-            sentence = sentences[end]
-            current_sentences.append(sentence)
-            current_chars += len(sentence)
-            end += 1
-
-        chunk_text = " ".join(current_sentences)
-        chunks.append(chunk_text)
-
-        if end >= len(sentences):
-            break
-
-        start = max(end - SENTENCE_OVERLAP, start + 1)
-
-    return chunks
+    
+    while start < text_len:
+        end = start + chunk_size
+        chunk = text[start:end]
+        if chunk.strip():  # Only yield non-empty chunks
+            yield chunk
+        start = end - overlap  # Move forward by chunk_size - overlap
 
 
 # ---------------------
@@ -137,51 +87,93 @@ if not files:
     sys.exit(0)
 
 # Load embedding model
-model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
 
 # Connect to Qdrant
 client = QdrantClient("http://localhost:6333")
 
 # Recreate collection with cosine distance
+# Note: all-mpnet-base-v2 produces 768-dimensional vectors
 client.recreate_collection(
     collection_name=collection,
-    vectors_config=VectorParams(size=384, distance="Cosine"),
+    vectors_config=VectorParams(size=768, distance="Cosine"),
 )
 
 total_chunks = 0
 
 for pdf_path in files:
     print(f"\n📄 Processing {pdf_path.name}...")
-    reader = PdfReader(str(pdf_path))
     doc_type = infer_doc_type(pdf_path.name)
-
-    for section_title, start_page, end_page, section_text in iter_sections(reader):
-        chunks = chunk_section_text(section_text)
-        if not chunks:
+    
+    # Extract and parse contract using parse_contract.py
+    try:
+        raw_text = extract_raw_text(pdf_path)
+        cleaned_text = clean_text(raw_text)
+        sections, clauses = parse_contract(cleaned_text, raw_text=raw_text)
+        
+        if not sections or not clauses:
+            print(f"⚠️  No sections or clauses found in {pdf_path.name}. Skipping.")
             continue
-
-        section_slug = normalize_slug(section_title)
-
-        for chunk_index, chunk in enumerate(chunks, start=1):
-            vector = model.encode(chunk).tolist()
-            payload = {
-                "text": chunk,
-                "section_heading": section_title,
-                "section_slug": section_slug,
-                "doc_type": doc_type,
-                "start_page": start_page,
-                "end_page": end_page,
-                "chunk_index": chunk_index,
-                "source": pdf_path.name,
-            }
-
-            point = PointStruct(
-                id=str(uuid.uuid4()),
-                vector=vector,
-                payload=payload,
-            )
-
-            client.upsert(collection_name=collection, points=[point])
-            total_chunks += 1
+        
+        # Get combined clauses (section_clauses_combined format)
+        combined_rows = combine_clauses_by_main(sections, clauses)
+        
+        print(f"   Found {len(sections)} sections, {len(clauses)} clauses, {len(combined_rows)} combined groups")
+        
+        # Create section map for efficient lookup
+        section_map = {s["section_id"]: s for s in sections}
+        
+        # Process each combined row
+        for row in combined_rows:
+            base_text = row.get("text", "").strip()
+            if not base_text:
+                continue
+            
+            # Chunk the text with character-based chunking and overlap
+            char_chunks = list(iter_char_chunks(base_text, CHUNK_SIZE, CHUNK_OVERLAP))
+            if not char_chunks:
+                continue
+            
+            # Extract metadata from combined row
+            section_id = row.get("section_id", "")
+            section_title = row.get("section_title", "")
+            main_clause_id = row.get("main_clause_id", "")
+            sub_clause_ids = row.get("sub_clause_ids", "")
+            
+            # Get page numbers from sections
+            section_info = section_map.get(section_id, {})
+            start_page = section_info.get("start_page", "")
+            end_page = section_info.get("end_page", "")
+            
+            # Create embeddings for each chunk
+            for chunk_index, chunk in enumerate(char_chunks, start=1):
+                vector = model.encode(chunk).tolist()
+                payload = {
+                    "text": chunk,
+                    "section_id": section_id,
+                    "section_title": section_title,
+                    "main_clause_id": main_clause_id,
+                    "sub_clause_ids": sub_clause_ids,
+                    "start_page": start_page,
+                    "end_page": end_page,
+                    "doc_type": doc_type,
+                    "source": pdf_path.name,
+                    "chunk_part": chunk_index,
+                }
+                
+                point = PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=vector,
+                    payload=payload,
+                )
+                
+                client.upsert(collection_name=collection, points=[point])
+                total_chunks += 1
+                
+    except Exception as e:
+        print(f"❌ Error processing {pdf_path.name}: {e}")
+        import traceback
+        traceback.print_exc()
+        continue
 
 print(f"\n✅ Finished ingesting {len(files)} PDFs into '{collection}' collection ({total_chunks} chunks).")

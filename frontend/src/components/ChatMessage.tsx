@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Bot, User } from "lucide-react";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import ReactMarkdown from "react-markdown";
 import {
   Accordion,
@@ -38,6 +38,8 @@ interface ChatMessageProps {
   content: string;
   response_type?: string;
   charts?: ChartData | null;
+  chart?: any; // Wage schedule chart format
+  chart_type?: string; // Wage schedule chart type
   results?: any[] | null;
   total_rows?: number;
   userQuery?: string; // Original user query to detect plot requests
@@ -53,6 +55,8 @@ const ChatMessage = ({
   content,
   response_type,
   charts,
+  chart,
+  chart_type,
   results,
   total_rows,
   userQuery,
@@ -115,9 +119,85 @@ const ChatMessage = ({
     });
   };
 
+  // Format wage schedule chart data (from backend chart prop)
+  const formatWageScheduleChart = (chart: any, chartType: string) => {
+    if (!chart || !chart.series) return null;
+    
+    if (chartType === "line") {
+      // Line chart: multiple series with points
+      const allYears = new Set<number>();
+      chart.series.forEach((series: any) => {
+        series.points?.forEach((point: any) => {
+          if (point.fiscal_year) allYears.add(point.fiscal_year);
+        });
+      });
+      
+      const sortedYears = Array.from(allYears).sort((a, b) => a - b);
+      
+      return sortedYears.map(year => {
+        const point: any = { date: year.toString() };
+        chart.series.forEach((series: any) => {
+          const seriesPoint = series.points?.find((p: any) => p.fiscal_year === year);
+          if (seriesPoint) {
+            point[series.name] = seriesPoint.value;
+          }
+        });
+        return point;
+      });
+    } else {
+      // Bar chart: single series with name/value pairs
+      // Format as array with single object containing all values
+      const barData: any = { date: "Comparison" };
+      chart.series.forEach((item: any) => {
+        barData[item.name] = item.value;
+      });
+      return [barData];
+    }
+  };
+
   // Format chart data from SQL results (if results have date column)
   const formatChartDataFromResults = (results: any[]) => {
     if (!results || results.length === 0) return null;
+    
+    // Check if results have FiscalYear column (for wage schedule)
+    if (results[0].FiscalYear !== undefined) {
+      const numericKeys = Object.keys(results[0]).filter(key => {
+        if (key === 'FiscalYear') return false;
+        if (key.toLowerCase().includes('id')) return false;
+        if (key.toLowerCase().includes('date') && !key.toLowerCase().includes('fiscal')) return false;
+        const value = results[0][key];
+        return typeof value === 'number';
+      });
+      
+      if (numericKeys.length === 0) return null;
+      
+      // Group by FiscalYear and average numeric columns
+      const yearMap = new Map<number, any>();
+      results.forEach((row: any) => {
+        const year = row.FiscalYear;
+        if (!yearMap.has(year)) {
+          yearMap.set(year, { date: year.toString(), counts: {} });
+        }
+        const point = yearMap.get(year);
+        numericKeys.forEach(key => {
+          if (!point[key]) {
+            point[key] = { sum: 0, count: 0 };
+          }
+          point[key].sum += row[key] || 0;
+          point[key].count += 1;
+        });
+      });
+      
+      return Array.from(yearMap.values()).map(point => {
+        const result: any = { date: point.date };
+        numericKeys.forEach(key => {
+          if (point[key]) {
+            result[key.replace(/_/g, ' ')] = point[key].sum / point[key].count;
+          }
+        });
+        return result;
+      }).sort((a, b) => parseInt(a.date) - parseInt(b.date));
+    }
     
     // Check if results have a date column
     const dateKeys = Object.keys(results[0]).filter(key => 
@@ -167,6 +247,7 @@ const ChatMessage = ({
   // 1. Check if charts object has chart data
   // 2. Check if user asked for plot/chart
   // 3. Check if results have date-based data that can be charted
+  // 4. Always show wage schedule charts if available
   const shouldShowChart = userQuery && (
     userQuery.toLowerCase().includes('plot') || 
     userQuery.toLowerCase().includes('chart') || 
@@ -176,8 +257,11 @@ const ChatMessage = ({
   );
   
   const chartDataFromCharts = charts ? formatChartDataFromCharts(charts) : null;
+  const chartDataFromWageSchedule = chart ? formatWageScheduleChart(chart, chart_type || "line") : null;
+  // Generate chart from raw results if user asked for plot/chart
   const chartDataFromResults = results && shouldShowChart ? formatChartDataFromResults(results) : null;
-  const chartData = chartDataFromCharts || chartDataFromResults;
+  // Priority: wage schedule chart > other charts > results-based chart
+  const chartData = chartDataFromWageSchedule || chartDataFromCharts || chartDataFromResults;
   
   const isUser = role === "user";
   const hasStructuredAnswer = !isUser && !!answer_points && answer_points.length > 0;
@@ -188,7 +272,7 @@ const ChatMessage = ({
   useEffect(() => {
     if (hasSources && sources) {
       setSourceLimit((prev) => {
-        const defaultLimit = Math.min(3, Math.min(10, sources.length));
+        const defaultLimit = Math.min(5, Math.min(10, sources.length));
         if (prev === 0) {
           return defaultLimit;
         }
@@ -217,9 +301,9 @@ const ChatMessage = ({
       <ul className="space-y-1 my-2">{children}</ul>
     ),
     li: ({ children }: any) => (
-      <li className="flex items-start gap-2">
-        <span className="text-primary mt-1">•</span>
-        <span className="flex-1">{children}</span>
+      <li className="flex items-start gap-2 min-w-0 max-w-full">
+        <span className="text-primary mt-1 shrink-0">•</span>
+        <span className="flex-1 break-words overflow-wrap-anywhere min-w-0">{children}</span>
       </li>
     ),
   };
@@ -239,7 +323,7 @@ const ChatMessage = ({
       
       <div
         className={cn(
-          "max-w-[85%] rounded-2xl px-4 py-3 shadow-soft transition-all",
+          "max-w-[85%] rounded-2xl px-4 py-3 shadow-soft transition-all min-w-0 w-full overflow-hidden",
           isUser
             ? "bg-gradient-to-br from-primary to-secondary text-primary-foreground"
             : "bg-card border border-border"
@@ -247,10 +331,10 @@ const ChatMessage = ({
       >
         {/* Show classification badge for assistant messages */}
         {!isUser && query_classification && (
-          <div className="mb-2 flex items-center gap-2">
+          <div className="mb-2 flex items-center gap-2 min-w-0 max-w-full">
             <span
               className={cn(
-                "rounded-full border px-2.5 py-1 text-xs font-medium tracking-wide",
+                "rounded-full border px-2.5 py-1 text-xs font-medium tracking-wide break-words overflow-wrap-anywhere max-w-full",
                 query_classification?.startsWith("Contract Knowledge")
                   ? "border-emerald-300/50 bg-emerald-500 text-white shadow-[0_0_0_1px_rgba(16,185,129,0.3)]"
                   : query_classification === "General Knowledge"
@@ -264,28 +348,28 @@ const ChatMessage = ({
         )}
         
         <div className={cn(
-          "text-sm leading-relaxed",
+          "text-sm leading-relaxed w-full max-w-full overflow-hidden",
           isUser ? "text-primary-foreground" : "text-foreground"
         )}>
           {isUser ? (
-            <p className="whitespace-pre-wrap">{content}</p>
+            <p className="whitespace-pre-wrap break-words overflow-wrap-anywhere">{content}</p>
           ) : hasStructuredAnswer ? (
-            <div className="space-y-4">
+            <div className="space-y-4 w-full max-w-full overflow-hidden">
               {opening && (
-                <p className="text-sm font-semibold text-foreground leading-relaxed">
+                <p className="text-sm font-semibold text-foreground leading-relaxed break-words overflow-wrap-anywhere">
                   {opening}
                 </p>
               )}
-              <ul className="mt-2 space-y-2 text-foreground">
+              <ul className="mt-2 space-y-2 text-foreground w-full max-w-full">
                 {answer_points?.map((point, idx) => (
-                  <li key={idx} className="flex gap-2">
-                    <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-primary" />
-                    <span className="flex-1">{point}</span>
+                  <li key={idx} className="flex gap-2 w-full min-w-0 max-w-full">
+                    <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-primary flex-shrink-0" />
+                    <span className="flex-1 break-words overflow-wrap-anywhere min-w-0">{point}</span>
                   </li>
                 ))}
               </ul>
               {disclaimer && (
-                <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+                <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm text-muted-foreground break-words overflow-wrap-anywhere">
                   <strong className="font-semibold text-foreground">Disclaimer:</strong> {disclaimer}
                 </div>
               )}
@@ -298,15 +382,15 @@ const ChatMessage = ({
         </div>
 
         {!hasStructuredAnswer && !isUser && disclaimer && (
-          <div className="mt-4 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+          <div className="mt-4 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm text-muted-foreground break-words overflow-wrap-anywhere">
             <strong className="font-semibold text-foreground">Disclaimer:</strong> {disclaimer}
           </div>
         )}
 
         {!isUser && hasSources && visibleSources.length > 0 && (
-          <div className="mt-4 rounded-lg border border-border bg-background/50 p-4">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-              <h4 className="text-sm font-semibold uppercase tracking-wide text-foreground">Sources</h4>
+          <div className="mt-4 rounded-lg border border-border bg-background/50 p-4 w-full max-w-full overflow-hidden">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3 w-full min-w-0">
+              <h4 className="text-sm font-semibold uppercase tracking-wide text-foreground shrink-0">Sources</h4>
               {maxSourceOptions > 1 && (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <span>Show</span>
@@ -329,13 +413,13 @@ const ChatMessage = ({
                 </div>
               )}
             </div>
-            <Accordion type="multiple" className="w-full">
+            <Accordion type="multiple" className="w-full max-w-full overflow-hidden">
               {visibleSources.map((entry, idx) => (
-                <AccordionItem key={`${entry.source}-${idx}`} value={`source-${idx}`}>
-                  <AccordionTrigger className="text-left text-sm font-medium text-foreground">
-                    <span className="flex flex-col items-start">
-                      <span>{`#${idx + 1} ${entry.source || "Unknown source"}`}</span>
-                      <span className="text-xs text-muted-foreground">
+                <AccordionItem key={`${entry.source}-${idx}`} value={`source-${idx}`} className="w-full max-w-full">
+                  <AccordionTrigger className="text-left text-sm font-medium text-foreground w-full max-w-full overflow-hidden [&>span]:w-full [&>span]:min-w-0">
+                    <span className="flex flex-col items-start w-full min-w-0 max-w-full">
+                      <span className="break-words overflow-wrap-anywhere w-full min-w-0 max-w-full">{`#${idx + 1} ${entry.source || "Unknown source"}`}</span>
+                      <span className="text-xs text-muted-foreground break-words overflow-wrap-anywhere w-full min-w-0 max-w-full">
                         {entry.clause && entry.clause !== "intro"
                           ? `${entry.clause}${
                               entry.clause_heading ? ` – ${entry.clause_heading}` : ""
@@ -345,9 +429,9 @@ const ChatMessage = ({
                       </span>
                     </span>
                   </AccordionTrigger>
-                  <AccordionContent className="text-sm text-muted-foreground">
+                  <AccordionContent className="text-sm text-muted-foreground w-full max-w-full overflow-hidden">
                     {entry.excerpt ? (
-                      <p className="whitespace-pre-wrap leading-relaxed">{entry.excerpt}</p>
+                      <p className="whitespace-pre-wrap leading-relaxed break-words overflow-wrap-anywhere w-full max-w-full">{entry.excerpt}</p>
                     ) : (
                       <p>No excerpt available from this source.</p>
                     )}
@@ -386,7 +470,7 @@ const ChatMessage = ({
         )}
         
         {/* Display SQL query results as table */}
-        {results && results.length > 0 && response_type === "sql_query" && (
+        {results && results.length > 0 && (response_type === "sql_query" || response_type === "wage_schedule_sql") && (
           <div className="mt-4 rounded-lg border border-border bg-background/50 p-4">
             <h4 className="text-sm font-semibold mb-3 text-foreground">
               Query Results {total_rows && total_rows > 10 ? `(Showing top 10 of ${total_rows} rows)` : `(${results.length} rows)`}
@@ -434,58 +518,108 @@ const ChatMessage = ({
         {/* Display charts when requested or available */}
         {chartData && chartData.length > 0 && (
           <div className="mt-4 rounded-lg border border-border bg-background/50 p-4">
-            <h4 className="text-sm font-semibold mb-3 text-foreground">Contract Activity Trends</h4>
+            <h4 className="text-sm font-semibold mb-3 text-foreground">
+              {chart_type === "bar" ? "Wage Rate Comparison" : "Wage Rate Trends"}
+            </h4>
             <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                <XAxis 
-                  dataKey="date" 
-                  tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
-                  angle={-45}
-                  textAnchor="end"
-                  height={80}
-                />
-                <YAxis 
-                  tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
-                />
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: 'hsl(var(--card))', 
-                    border: '1px solid hsl(var(--border))',
-                    borderRadius: '8px',
-                    fontSize: '12px'
-                  }}
-                  labelStyle={{ color: 'hsl(var(--foreground))' }}
-                />
-                <Legend 
-                  wrapperStyle={{ fontSize: '12px' }}
-                  iconType="line"
-                />
-                {Object.keys(chartData[0] || {})
-                  .filter(key => key !== 'date')
-                  .map((key, index) => {
-                    const colors = [
-                      'hsl(var(--primary))',
-                      'hsl(207, 88%, 62%)',
-                      'hsl(187, 70%, 55%)',
-                      'hsl(166, 60%, 48%)',
-                      'hsl(222, 70%, 65%)',
-                      'hsl(200, 80%, 58%)'
-                    ];
-                    return (
-                      <Line 
-                        key={key}
-                        type="monotone" 
-                        dataKey={key} 
-                        stroke={colors[index % colors.length]}
-                        strokeWidth={2}
-                        name={key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' ')}
-                        dot={{ r: 4 }}
-                        activeDot={{ r: 6 }}
-                      />
-                    );
-                  })}
-              </LineChart>
+              {chart_type === "bar" ? (
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                  <XAxis 
+                    dataKey="date" 
+                    tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+                    angle={-45}
+                    textAnchor="end"
+                    height={80}
+                  />
+                  <YAxis 
+                    tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+                  />
+                  <Tooltip 
+                    contentStyle={{ 
+                      backgroundColor: 'hsl(var(--card))', 
+                      border: '1px solid hsl(var(--border))',
+                      borderRadius: '8px',
+                      fontSize: '12px'
+                    }}
+                    labelStyle={{ color: 'hsl(var(--foreground))' }}
+                  />
+                  <Legend 
+                    wrapperStyle={{ fontSize: '12px' }}
+                  />
+                  {Object.keys(chartData[0] || {})
+                    .filter(key => key !== 'date')
+                    .map((key, index) => {
+                      const colors = [
+                        'hsl(var(--primary))',
+                        'hsl(207, 88%, 62%)',
+                        'hsl(187, 70%, 55%)',
+                        'hsl(166, 60%, 48%)',
+                        'hsl(222, 70%, 65%)',
+                        'hsl(200, 80%, 58%)'
+                      ];
+                      return (
+                        <Bar 
+                          key={key}
+                          dataKey={key} 
+                          fill={colors[index % colors.length]}
+                          name={key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' ')}
+                        />
+                      );
+                    })}
+                </BarChart>
+              ) : (
+                <LineChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                  <XAxis 
+                    dataKey="date" 
+                    tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+                    angle={-45}
+                    textAnchor="end"
+                    height={80}
+                  />
+                  <YAxis 
+                    tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+                  />
+                  <Tooltip 
+                    contentStyle={{ 
+                      backgroundColor: 'hsl(var(--card))', 
+                      border: '1px solid hsl(var(--border))',
+                      borderRadius: '8px',
+                      fontSize: '12px'
+                    }}
+                    labelStyle={{ color: 'hsl(var(--foreground))' }}
+                  />
+                  <Legend 
+                    wrapperStyle={{ fontSize: '12px' }}
+                    iconType="line"
+                  />
+                  {Object.keys(chartData[0] || {})
+                    .filter(key => key !== 'date')
+                    .map((key, index) => {
+                      const colors = [
+                        'hsl(var(--primary))',
+                        'hsl(207, 88%, 62%)',
+                        'hsl(187, 70%, 55%)',
+                        'hsl(166, 60%, 48%)',
+                        'hsl(222, 70%, 65%)',
+                        'hsl(200, 80%, 58%)'
+                      ];
+                      return (
+                        <Line 
+                          key={key}
+                          type="monotone" 
+                          dataKey={key} 
+                          stroke={colors[index % colors.length]}
+                          strokeWidth={2}
+                          name={key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' ')}
+                          dot={{ r: 4 }}
+                          activeDot={{ r: 6 }}
+                        />
+                      );
+                    })}
+                </LineChart>
+              )}
             </ResponsiveContainer>
           </div>
         )}

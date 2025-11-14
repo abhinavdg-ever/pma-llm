@@ -51,6 +51,13 @@ class QueryResponse(BaseModel):
     matches: List[Dict[str, Any]] = Field(default_factory=list)
     total_matches: int = 0
     query_classification: Optional[str] = None
+    # Wage schedule and SQL query fields
+    results: Optional[List[Dict[str, Any]]] = None
+    sql_query: Optional[str] = None
+    chart: Optional[Dict[str, Any]] = None
+    chart_type: Optional[str] = None
+    opening: Optional[str] = None
+    total_rows: Optional[int] = None
 
 
 class HealthResponse(BaseModel):

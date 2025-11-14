@@ -13,3 +13,5 @@ langchain-openai
 langchain-pinecone
 qdrant-client
 tabulate
+pypdf
+sentence-transformers

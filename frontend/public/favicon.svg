@@ -16,11 +16,11 @@
       <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#0a2f4f" flood-opacity="0.22" />
     </filter>
   </defs>
-
+  
   <rect width="64" height="64" rx="16" fill="url(#sky)" />
   <path d="M8 40c6 4 12 6 24 6s18-2 24-6v14H8z" fill="url(#sea)" />
   <path d="M10 48c5 3 11 5 22 5s17-2 22-5" stroke="rgba(255,255,255,0.35)" stroke-width="2" fill="none" stroke-linecap="round" />
-
+  
   <g filter="url(#softShadow)">
     <path
       d="M34 15v8h5a1.8 1.8 0 1 1 0 3.6h-5v8.4c4.62 0.74 8.34 4.84 8.34 9.66h-3.6c0-3.5-2.7-6.38-6.02-6.38H32v12.3l6-6a1.8 1.8 0 1 1 2.55 2.55l-8.44 8.44a1.4 1.4 0 0 1-1.98 0l-8.44-8.44a1.8 1.8 0 1 1 2.55-2.55l6 6V38.9h-1.57C21.7 38.9 19 41.78 19 45.28h-3.6c0-4.82 3.72-8.92 8.34-9.66V27.6h-5a1.8 1.8 0 1 1 0-3.6h5v-8a2.4 2.4 0 0 1 2.4-2.4h5.2A2.4 2.4 0 0 1 34 15z"
