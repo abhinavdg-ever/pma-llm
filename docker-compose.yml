@@ -28,7 +28,7 @@ services:
       - WAGE_DB_PORT=3306
       - WAGE_DB_USER=external
       - WAGE_DB_PASSWORD=External22x^^5420!
-      - WAGE_DB_NAME=ym_test
+      - WAGE_DB_NAME=ym_raw_data_downstream
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/health"]
       interval: 30s
