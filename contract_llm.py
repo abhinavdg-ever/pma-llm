@@ -12,6 +12,7 @@ from tabulate import tabulate
 SECTION_REF_REGEX = re.compile(r"(section\s+\d+[A-Za-z0-9\-\.]*)", re.IGNORECASE)
 ARTICLE_REF_REGEX = re.compile(r"(article\s+\d+[A-Za-z0-9\-\.]*)", re.IGNORECASE)
 APPENDIX_REF_REGEX = re.compile(r"(appendix\s+[A-Za-z0-9]+)", re.IGNORECASE)
+CLAUSE_REF_REGEX = re.compile(r"(clause\s+\d+[A-Za-z0-9\-\.]*)", re.IGNORECASE)
 # Core wage keywords - explicit wage/salary/pay terms that should trigger wage_schedule classification
 CORE_WAGE_KEYWORDS = [
     "wage",
@@ -353,6 +354,55 @@ class VectorDatabase:
         except Exception:
             return None
 
+    def exact_match_search(
+        self,
+        filter_conditions: List[Any],
+        limit: int = 100,
+        collection_override: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Search by exact match on metadata fields (section_title, section_id, main_clause_id)."""
+        if not self.client:
+            return []
+
+        search_filter = None
+        if filter_conditions and self.Filter:
+            try:
+                search_filter = self.Filter(must=[cond for cond in filter_conditions if cond])
+            except Exception:
+                search_filter = None
+
+        if not search_filter:
+            return []
+
+        # Use scroll to get all matching points (no vector search needed for exact match)
+        try:
+            results, _ = self.client.scroll(
+                collection_name=collection_override or self.collection,
+                scroll_filter=search_filter,
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+            )
+
+            formatted: List[Dict[str, Any]] = []
+            for point in results:
+                payload = point.payload or {}
+                formatted.append(
+                    {
+                        "id": getattr(point, "id", None),
+                        "score": 1.0,  # Exact match gets perfect score
+                        "content": payload.get("text") or payload.get("content", ""),
+                        "source": payload.get("source", "unknown"),
+                        "metadata": payload,
+                    }
+                )
+            return formatted
+        except Exception as exc:
+            import logging
+            logger = logging.getLogger("contract-insights-engine")
+            logger.error(f"[VectorDatabase] Error in exact_match_search: {exc}")
+            return []
+
 
 class QueryClassifier:
     """Classify questions into contract knowledge, generic, or off-topic buckets."""
@@ -536,7 +586,9 @@ class ContractInsightsEngine:
         self.embedder_openai = OpenAIEmbeddingClient(Config.OPENAI_API_KEY) if Config.OPENAI_API_KEY else None  # OpenAI embeddings
         
         # Create vector DBs for both collections
-        self.vector_db_llama = VectorDatabase(Config.QDRANT_URL, Config.QDRANT_COLLECTION, self.embedder_llama)
+        # Force "contracts" for Llama (not "docs" from env var)
+        llama_collection = "contracts"
+        self.vector_db_llama = VectorDatabase(Config.QDRANT_URL, llama_collection, self.embedder_llama)
         self.vector_db_openai = VectorDatabase(Config.QDRANT_URL, Config.QDRANT_COLLECTION_BIG, self.embedder_openai) if self.embedder_openai else None
         
         # Default to llama embedder for backward compatibility
@@ -620,6 +672,14 @@ class ContractInsightsEngine:
         self.logger.info("Query received | classification=%s | mode=%s | top_k=%d | query=%s", classification, mode, effective_top_k, query)
 
         if classification == "contract_knowledge":
+            # Check for exact match identifiers (section_title, section_id, main_clause_id)
+            section_title = self._extract_section_title(query)
+            section_id_exact = self._extract_section_id(query)
+            main_clause_id = self._extract_main_clause_id(query)
+            
+            # Use exact match search if any identifier is found
+            use_exact_match = bool(section_title or section_id_exact or main_clause_id)
+            
             # Detect multiple employee types or use "all" if none specified
             doc_types = self._infer_doc_types(query)
             filter_conditions: List[Any] = []
@@ -634,22 +694,87 @@ class ContractInsightsEngine:
             else:
                 # Multiple types or "all" - don't filter by doc_type, search all collections
                 doc_type = None  # Will search all collections
-
+            
+            # Also check for section reference (existing logic)
             section_id_filter = self._extract_section_reference(query)
-            if section_id_filter:
-                section_condition = self.vector_db.make_match_condition("section_id", section_id_filter)
+            if section_id_filter and not section_id_exact:
+                # Section reference also triggers exact match
+                use_exact_match = True
+            
+            # Validate: If using exact match (any identifier), require a specific contract to be specified
+            if use_exact_match and doc_type is None:
+                doc_type_label = "all"
+                opening_text = "Document Not Specified"
+                if debug_info is not None:
+                    debug_info["error"] = "Document not specified for exact match search"
+                    debug_info["note"] = "Exact match search requires a specific document type (longshore, clerks, or walking_bosses) to be specified"
+                return {
+                    "response_type": "contract_knowledge",
+                    "content": "Document not specified. Please resubmit with the document type (longshore, clerks, or walking_bosses) specified in your query.",
+                    "answer_points": [],
+                    "tables": [],
+                    "disclaimer": "To search for a specific section or clause, please include the document type in your query. For example: 'Section 2 in Longshore Agreement' or 'Clause 4.36 in Clerks Contract'.",
+                    "sources": [],
+                    "matches": [],
+                    "total_matches": 0,
+                    "opening": opening_text,
+                    "doc_type": doc_type_label,
+                    "query": query,
+                }
+
+            # Add exact match filters if found
+            if section_title:
+                title_condition = self.vector_db.make_match_condition("section_title", section_title)
+                if title_condition:
+                    filter_conditions.append(title_condition)
+                debug_info["section_title"] = section_title
+            
+            if section_id_exact:
+                section_condition = self.vector_db.make_match_condition("section_id", section_id_exact)
                 if section_condition:
                     filter_conditions.append(section_condition)
+                debug_info["section_id"] = section_id_exact
+            
+            if main_clause_id:
+                clause_condition = self.vector_db.make_match_condition("main_clause_id", main_clause_id)
+                if clause_condition:
+                    filter_conditions.append(clause_condition)
+                debug_info["main_clause_id"] = main_clause_id
+
+            # Also check for section/clause reference (existing logic)
+            section_id_filter = self._extract_section_reference(query)
+            if section_id_filter and not section_id_exact:
+                # Check if it's a clause reference (contains a dot, e.g., "2.1" or "4.36") or section reference (just number, e.g., "2")
+                if '.' in section_id_filter:
+                    # Clause reference - could be in main_clause_id or sub_clause_ids
+                    # First, filter by section_id to get all chunks from that section
+                    section_num = section_id_filter.split('.')[0]
+                    section_condition = self.vector_db.make_match_condition("section_id", section_num)
+                    if section_condition:
+                        filter_conditions.append(section_condition)
+                    # Store the clause reference for post-filtering (check sub_clause_ids)
+                    use_exact_match = True
+                    debug_info["clause_reference"] = section_id_filter  # Store for post-filtering
+                    debug_info["section_id"] = section_num  # Also store section for filtering
+                else:
+                    # Section reference - use section_id filter
+                    section_condition = self.vector_db.make_match_condition("section_id", section_id_filter)
+                    if section_condition:
+                        filter_conditions.append(section_condition)
+                    use_exact_match = True
+                    debug_info["section_id"] = section_id_filter
 
             self.logger.info(
-                "Contract query routed | doc_types=%s | section_id=%s",
+                "Contract query routed | doc_types=%s | section_id=%s | section_title=%s | main_clause_id=%s | use_exact_match=%s",
                 doc_types,
-                section_id_filter or "none",
+                section_id_exact or section_id_filter or "none",
+                section_title or "none",
+                main_clause_id or "none",
+                use_exact_match,
             )
             debug_info["doc_types"] = doc_types
             debug_info["doc_type"] = doc_types[0] if len(doc_types) == 1 else "all"
-            if section_id_filter:
-                debug_info["section_id"] = section_id_filter
+            debug_info["use_exact_match"] = use_exact_match
 
             # Use contracts_big collection + OpenAI embeddings for OpenAI mode
             # Use contracts collection + sentence-transformers embeddings for Llama mode
@@ -665,21 +790,35 @@ class ContractInsightsEngine:
                 vector_db = self.vector_db_openai
                 self.logger.info(f"[Vector Search] Using OpenAI embeddings + collection: {collection_name}")
             else:
-                collection_name = Config.QDRANT_COLLECTION
+                # Force "contracts" collection for Llama mode (not "docs")
+                collection_name = "contracts"
                 vector_db = self.vector_db_llama
                 self.logger.info(f"[Vector Search] Using sentence-transformers embeddings + collection: {collection_name}")
             
-            payload = self._answer_with_contract_knowledge(
-                query,
-                effective_top_k,
-                doc_type=doc_types[0] if len(doc_types) == 1 else None,
-                doc_types=doc_types if len(doc_types) > 1 else None,
-                collection_name=collection_name,
-                filter_conditions=filter_conditions or None,
-                debug_info=debug_info,
-                mode=mode,
-                vector_db=vector_db,
-            )
+            # Use exact match search if identifiers found, otherwise use similarity search
+            if use_exact_match:
+                payload = self._answer_with_exact_match(
+                    query,
+                    filter_conditions=filter_conditions or None,
+                    collection_name=collection_name,
+                    debug_info=debug_info,
+                    mode=mode,
+                    vector_db=vector_db,
+                    doc_type=doc_types[0] if len(doc_types) == 1 else None,
+                    doc_types=doc_types if len(doc_types) > 1 else None,
+                )
+            else:
+                payload = self._answer_with_contract_knowledge(
+                    query,
+                    effective_top_k,
+                    doc_type=doc_types[0] if len(doc_types) == 1 else None,
+                    doc_types=doc_types if len(doc_types) > 1 else None,
+                    collection_name=collection_name,
+                    filter_conditions=filter_conditions or None,
+                    debug_info=debug_info,
+                    mode=mode,
+                    vector_db=vector_db,
+                )
         elif classification == "wage_schedule":
             debug_info["doc_type"] = "wage_schedule"
             payload = self._answer_wage_schedule(query, debug_info, mode=mode)
@@ -948,6 +1087,338 @@ class ContractInsightsEngine:
             "opening": opening_text,
             "doc_type": doc_type_for_opening,
         }
+
+    def _answer_with_exact_match(
+        self,
+        query: str,
+        filter_conditions: Optional[List[Any]] = None,
+        collection_name: Optional[str] = None,
+        debug_info: Optional[Dict[str, Any]] = None,
+        mode: str = "llama",
+        vector_db: Optional[VectorDatabase] = None,
+        doc_type: Optional[str] = None,
+        doc_types: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Handle queries with exact match on section_title, section_id, or main_clause_id.
+        Returns all matching chunks and generates a summary."""
+        # Use provided vector_db or fall back to default based on mode
+        if vector_db is None:
+            vector_db = self.vector_db_llama if mode == "llama" else (self.vector_db_openai or self.vector_db_llama)
+        
+        # Use exact match search to get all chunks
+        matches = vector_db.exact_match_search(
+            filter_conditions=filter_conditions or [],
+            limit=1000,  # Get all matching chunks
+            collection_override=collection_name,
+        )
+        
+        # Post-filter: If clause_reference was specified, filter by main_clause_id or sub_clause_ids
+        clause_reference = debug_info.get("clause_reference") if debug_info else None
+        self.logger.info(
+            "Exact match search | collection=%s | matches=%d | clause_reference=%s",
+            collection_name,
+            len(matches),
+            clause_reference or "none"
+        )
+        if clause_reference and matches:
+            filtered_matches = []
+            for match in matches:
+                metadata = match.get("metadata", {})
+                main_clause_id = str(metadata.get("main_clause_id", "")).strip()
+                sub_clause_ids = str(metadata.get("sub_clause_ids", "")).strip()
+                
+                # Check if clause_reference matches main_clause_id
+                if main_clause_id == clause_reference:
+                    filtered_matches.append(match)
+                    self.logger.debug("Match found via main_clause_id: %s", main_clause_id)
+                    continue
+                
+                # Check if clause_reference is in sub_clause_ids (comma-separated list)
+                if sub_clause_ids:
+                    sub_clauses = [s.strip() for s in sub_clause_ids.split(',')]
+                    # Check exact match
+                    if clause_reference in sub_clauses:
+                        filtered_matches.append(match)
+                        self.logger.debug("Match found via sub_clause_ids (exact): %s in [%s]", clause_reference, sub_clause_ids)
+                        continue
+                    # Also check if any sub-clause starts with the clause_reference (e.g., "4.36" matches "4.36.1")
+                    for sub_clause in sub_clauses:
+                        if sub_clause.startswith(clause_reference + '.'):
+                            filtered_matches.append(match)
+                            self.logger.debug("Match found via sub_clause_ids (prefix): %s matches %s", clause_reference, sub_clause)
+                            break
+                    if filtered_matches and filtered_matches[-1] == match:
+                        continue
+                
+                # Log for debugging
+                self.logger.debug(
+                    "No match: clause_reference=%s, main_clause_id=%s, sub_clause_ids=%s",
+                    clause_reference,
+                    main_clause_id,
+                    sub_clause_ids
+                )
+            
+            if filtered_matches:
+                total_before = len(matches)
+                matches = filtered_matches
+                self.logger.info(
+                    "Post-filtered to %d matches for clause %s (out of %d total matches from section)",
+                    len(matches),
+                    clause_reference,
+                    total_before
+                )
+            else:
+                # No matches found for the specific clause
+                matches = []
+        
+        if not matches:
+            # If no exact matches found and section/clause was mentioned, return error message
+            # Don't use similarity search - only use exact match for section/clause queries
+            section_ref = self._extract_section_reference(query)
+            section_title = self._extract_section_title(query)
+            section_id_exact = self._extract_section_id(query)
+            main_clause_id = self._extract_main_clause_id(query)
+            
+            # If any section/clause identifier was mentioned, we should have found matches
+            # If not, return error message (don't fall back to similarity search)
+            if section_ref or section_title or section_id_exact or main_clause_id:
+                # Build the reference string for the error message
+                ref_parts = []
+                if section_ref:
+                    ref_parts.append(f"section/clause '{section_ref}'")
+                if section_title:
+                    ref_parts.append(f"section title '{section_title}'")
+                if section_id_exact:
+                    ref_parts.append(f"section_id '{section_id_exact}'")
+                if main_clause_id:
+                    ref_parts.append(f"main_clause_id '{main_clause_id}'")
+                
+                ref_string = ", ".join(ref_parts)
+                
+                self.logger.warning(
+                    "No exact matches found for %s in collection %s, returning error message",
+                    ref_string,
+                    collection_name
+                )
+                
+                # Return error message
+                if doc_types and len(doc_types) > 1:
+                    doc_type_label = "all"
+                    doc_labels = []
+                    type_label_map = {
+                        "walking_bosses": "Walking Bosses and Foremen",
+                        "clerks": "Clerks",
+                        "longshore": "Longshore",
+                    }
+                    for dt in doc_types:
+                        doc_labels.append(type_label_map.get(dt, dt.title()))
+                    cleaned_query = re.sub(r'\s+', ' ', query.strip())
+                    opening_text = f"Key findings from the {', '.join(doc_labels)} contracts regarding \"{cleaned_query}\":"
+                else:
+                    doc_type_label = doc_type or (debug_info.get("doc_type") if debug_info else "longshore")
+                    opening_text = self._craft_opening_text(query, doc_type_label)
+                
+                if debug_info is not None:
+                    debug_info["retrieved_sources"] = []
+                    debug_info["note"] = f"Can't find {ref_string}"
+                    debug_info["collection_used"] = collection_name
+                
+                # Create a more helpful error message
+                error_content = f"Can't find this section/clause: {ref_string}."
+                if section_ref and '.' in section_ref:
+                    error_content += f" Please verify the Section or Clause ID. The clause '{section_ref}' was not found in the {doc_type_label} contract document."
+                else:
+                    error_content += " Please verify the section_id, section_title, main_clause_id, or section/clause reference you provided."
+                
+                return {
+                    "response_type": "contract_knowledge",
+                    "content": error_content,
+                    "answer_points": [],
+                    "tables": [],
+                    "disclaimer": "The specified section or clause was not found in the contract documents. Please check the section/clause identifier and try again.",
+                    "sources": [],
+                    "matches": [],
+                    "total_matches": 0,
+                    "opening": opening_text,
+                    "doc_type": doc_type_label,
+                    "query": query,
+                }
+            
+            # If no section/clause was mentioned and no matches, return standard no matches message
+            if doc_types and len(doc_types) > 1:
+                doc_type_label = "all"
+                doc_labels = []
+                type_label_map = {
+                    "walking_bosses": "Walking Bosses and Foremen",
+                    "clerks": "Clerks",
+                    "longshore": "Longshore",
+                }
+                for dt in doc_types:
+                    doc_labels.append(type_label_map.get(dt, dt.title()))
+                cleaned_query = re.sub(r'\s+', ' ', query.strip())
+                opening_text = f"Key findings from the {', '.join(doc_labels)} contracts regarding \"{cleaned_query}\":"
+            else:
+                doc_type_label = doc_type or (debug_info.get("doc_type") if debug_info else "longshore")
+                opening_text = self._craft_opening_text(query, doc_type_label)
+            
+            if debug_info is not None:
+                debug_info["retrieved_sources"] = []
+                debug_info["note"] = "No matches from exact match search"
+            return {
+                "response_type": "contract_knowledge",
+                "content": "No matching chunks were found for the specified identifier(s).",
+                "answer_points": [],
+                "tables": [],
+                "disclaimer": "Please verify the section_title, section_id, or main_clause_id you provided.",
+                "sources": [],
+                "matches": [],
+                "total_matches": 0,
+                "opening": opening_text,
+                "doc_type": doc_type_label,
+                "query": query,
+            }
+        
+
+        sources = self._build_source_entries(matches)
+        
+        # Generate summary using LLM
+        summary = self._generate_summary_for_chunks(query, matches, sources, mode=mode)
+        
+        # Parse summary into bullet points (split by newlines or bullet markers)
+        answer_points = []
+        if summary:
+            # Split by newlines and filter out empty lines
+            lines = [line.strip() for line in summary.split('\n') if line.strip()]
+            for line in lines:
+                # Remove bullet markers if present (•, -, *, etc.)
+                cleaned_line = re.sub(r'^[\s•\-\*\+]\s*', '', line)
+                if cleaned_line:
+                    answer_points.append(cleaned_line)
+        
+        # If no bullet points were extracted, use the summary as a single point
+        if not answer_points and summary:
+            answer_points = [summary]
+        
+        # Create opening text
+        if doc_types and len(doc_types) > 1:
+            doc_labels = []
+            type_label_map = {
+                "walking_bosses": "Walking Bosses and Foremen",
+                "clerks": "Clerks",
+                "longshore": "Longshore",
+            }
+            for dt in doc_types:
+                doc_labels.append(type_label_map.get(dt, dt.title()))
+            cleaned_query = re.sub(r'\s+', ' ', query.strip())
+            opening_text = f"Summary of chunks from the {', '.join(doc_labels)} contracts matching the specified identifier(s):"
+        else:
+            doc_type_for_opening = doc_type or (debug_info.get("doc_type") if debug_info else "longshore")
+            opening_text = f"Summary of chunks from the {doc_type_for_opening} contract matching the specified identifier(s):"
+        
+        # Assemble content using answer_points (bullet points)
+        if answer_points:
+            content = self._assemble_contract_content(
+                answer_points,
+                "This is a summary of all chunks matching the specified identifier(s). Please refer to exact contract text for detailed understanding.",
+                sources
+            )
+        else:
+            content = "Retrieved chunks for the specified identifier(s)."
+        
+        if debug_info is not None:
+            debug_info["retrieved_sources"] = [
+                {
+                    "source": src.get("source"),
+                    "section_title": src.get("section_heading"),
+                    "clause": src.get("clause"),
+                    "main_clause_id": src.get("main_clause_id"),
+                    "sub_clause_ids": src.get("sub_clause_ids"),
+                    "page": src.get("page"),
+                    "score": src.get("score"),
+                }
+                for src in sources[:20]  # Show up to 20 sources in debug
+            ]
+            debug_info["total_chunks"] = len(matches)
+            self.logger.info(
+                "Exact match search | chunks=%d | details=%s",
+                len(matches),
+                debug_info["retrieved_sources"][:5] if debug_info["retrieved_sources"] else [],
+            )
+
+        # Extract disclaimer from content if it was assembled, otherwise use default
+        default_disclaimer = "This is a summary of all chunks matching the specified identifier(s). Please refer to exact contract text for detailed understanding."
+        disclaimer = default_disclaimer
+        
+        return {
+            "response_type": "contract_knowledge",
+            "content": content,
+            "answer_points": answer_points,
+            "disclaimer": disclaimer,
+            "sources": sources[:10],  # Show top 10 sources
+            "tables": [],
+            "matches": matches,
+            "total_matches": len(matches),
+            "opening": opening_text,
+            "doc_type": doc_type_for_opening if not (doc_types and len(doc_types) > 1) else "all",
+            "query": query,
+        }
+
+    def _generate_summary_for_chunks(
+        self,
+        query: str,
+        matches: List[Dict[str, Any]],
+        sources: List[Dict[str, Any]],
+        mode: str = "llama",
+    ) -> str:
+        """Generate a summary of the retrieved chunks using LLM."""
+        if not matches or not sources:
+            return ""
+        
+        llm_client = self._get_llm_client(mode)
+        if not llm_client.available():
+            # Fallback: return a simple summary
+            return f"Found {len(matches)} chunk(s) matching the specified identifier(s)."
+        
+        # Combine all chunk contents
+        chunk_texts = []
+        for i, src in enumerate(sources[:50], 1):  # Limit to 50 chunks for summary
+            excerpt = src.get("excerpt", "").strip()
+            if excerpt:
+                section = src.get("section_heading", "Unknown Section")
+                clause = src.get("clause", "Unknown Clause")
+                chunk_texts.append(f"Chunk {i} (Section: {section}, Clause: {clause}):\n{excerpt}\n")
+        
+        combined_text = "\n".join(chunk_texts)
+        
+        # Truncate if too long (keep last 8000 chars to preserve context)
+        if len(combined_text) > 10000:
+            combined_text = "..." + combined_text[-8000:]
+        
+        prompt = f"""You are analyzing contract document chunks retrieved by exact match on section_title, section_id, or main_clause_id.
+
+The user query was: "{query}"
+
+Below are {len(chunk_texts)} chunks that match the specified identifier(s):
+
+{combined_text}
+
+Please provide a comprehensive summary of these chunks. The summary should:
+1. Identify the main topics and themes covered
+2. Highlight key provisions, requirements, or rules
+3. Note any important details or exceptions
+4. Format as bullet points (one point per line, each point should be a complete sentence)
+5. Aim for 5-10 bullet points that cover the key information
+
+Format your response as bullet points, one per line. Each bullet point should be a complete, standalone sentence.
+
+Summary:"""
+
+        try:
+            summary = llm_client.generate(prompt, timeout=60)
+            return summary.strip()
+        except Exception as exc:
+            self.logger.error(f"Error generating summary: {exc}")
+            return f"Found {len(matches)} chunk(s) matching the specified identifier(s). Unable to generate summary due to error."
 
     def _build_source_entries(self, matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         entries: List[Dict[str, Any]] = []
@@ -2499,10 +2970,63 @@ class ContractInsightsEngine:
         return f"Key findings from the {doc_label} regarding “{question_summary}”:"
 
     def _extract_section_reference(self, query: str) -> Optional[str]:
-        for pattern in (SECTION_REF_REGEX, ARTICLE_REF_REGEX, APPENDIX_REF_REGEX):
+        """Extract section/clause reference and return just the numeric identifier.
+        E.g., 'Section 2' -> '2', 'Clause 2.1' -> '2.1'"""
+        for pattern in (SECTION_REF_REGEX, ARTICLE_REF_REGEX, APPENDIX_REF_REGEX, CLAUSE_REF_REGEX):
             match = pattern.search(query)
             if match:
-                return self._normalize_section_slug(match.group(1))
+                # Extract the full match (e.g., "section 2" or "clause 2.1")
+                full_match = match.group(1)
+                # Extract just the numeric part (e.g., "2" or "2.1")
+                # Remove the word (section/clause/article/appendix) and keep the number
+                numeric_part = re.sub(r'^(?:section|article|appendix|clause)\s+', '', full_match, flags=re.IGNORECASE).strip()
+                return numeric_part
+        return None
+
+    def _extract_section_id(self, query: str) -> Optional[str]:
+        """Extract section_id from query. Looks for patterns like 'section_id: X' or 'section_id=X'."""
+        # Pattern for section_id: X or section_id=X
+        patterns = [
+            re.compile(r"section_id\s*[:=]\s*([A-Za-z0-9\-\.]+)", re.IGNORECASE),
+            re.compile(r"section\s+id\s+([A-Za-z0-9\-\.]+)", re.IGNORECASE),
+        ]
+        for pattern in patterns:
+            match = pattern.search(query)
+            if match:
+                return match.group(1).strip()
+        return None
+
+    def _extract_main_clause_id(self, query: str) -> Optional[str]:
+        """Extract main_clause_id from query. Looks for patterns like 'main_clause_id: X' or 'clause_id=X'."""
+        # Pattern for main_clause_id: X or main_clause_id=X or clause_id: X
+        patterns = [
+            re.compile(r"main_clause_id\s*[:=]\s*([A-Za-z0-9\-\.]+)", re.IGNORECASE),
+            re.compile(r"main\s+clause\s+id\s+([A-Za-z0-9\-\.]+)", re.IGNORECASE),
+            re.compile(r"clause_id\s*[:=]\s*([A-Za-z0-9\-\.]+)", re.IGNORECASE),
+            re.compile(r"clause\s+id\s+([A-Za-z0-9\-\.]+)", re.IGNORECASE),
+        ]
+        for pattern in patterns:
+            match = pattern.search(query)
+            if match:
+                return match.group(1).strip()
+        return None
+
+    def _extract_section_title(self, query: str) -> Optional[str]:
+        """Extract section_title from query. Looks for explicit patterns like 'section_title: "X"' or 'section title: "X"'.
+        Only matches when explicitly specified with section_title/section title prefix to avoid false positives."""
+        # Pattern for section_title: "X" or section_title='X' or section title: "X"
+        # Must have explicit "section_title:" or "section title:" prefix to avoid matching general queries
+        patterns = [
+            re.compile(r"section_title\s*[:=]\s*['\"]([^'\"]+)['\"]", re.IGNORECASE),
+            re.compile(r"section\s+title\s*[:=]\s*['\"]([^'\"]+)['\"]", re.IGNORECASE),
+        ]
+        for pattern in patterns:
+            match = pattern.search(query)
+            if match:
+                return match.group(1).strip()
+        
+        # Don't extract general quoted text - only match explicit section_title patterns
+        # This prevents false positives from normal queries that happen to have quotes
         return None
 
     def _build_fallback_summary(self, query: str, sources: List[Dict[str, Any]]) -> List[str]:

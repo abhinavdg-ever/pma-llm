@@ -119,5 +119,11 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
-
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    
+    # Configuration for VPS deployment
+    port = int(os.getenv("PORT", "8000"))
+    host = os.getenv("HOST", "0.0.0.0")
+    reload = os.getenv("RELOAD", "false").lower() == "true"  # Disable reload for production/VPS
+    
+    logger.info(f"Starting FastAPI server on {host}:{port} (reload={reload})")
+    uvicorn.run("app:app", host=host, port=port, reload=reload)
