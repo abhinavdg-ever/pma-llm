@@ -328,62 +328,17 @@ class VectorDatabase:
         if search_filter is not None:
             search_kwargs["query_filter"] = search_filter
 
-        # Use the correct method based on qdrant-client version
-        # In newer versions (1.7+), the API changed
-        collection_name_for_search = collection_override or self.collection
-        
-        # Try different API methods based on version
-        results = None
-        used_scroll = False
-        
-        try:
-            # Method 1: search_points (newer versions 1.7+)
-            if hasattr(self.client, 'search_points'):
-                search_result = self.client.search_points(
-                    collection_name=collection_name_for_search,
-                    query_vector=query_vector,
-                    limit=limit,
-                    query_filter=search_filter,
-                )
-                # search_points returns SearchResult with .points attribute
-                if hasattr(search_result, 'points'):
-                    results = search_result.points
-                else:
-                    results = search_result
-            # Method 2: Direct search (older versions < 1.7)
-            elif hasattr(self.client, 'search'):
-                results = self.client.search(**search_kwargs)
-            # Method 3: Try using collections API
-            else:
-                from qdrant_client.models import SearchRequest, Filter
-                search_request = SearchRequest(
-                    vector=query_vector,
-                    limit=limit,
-                    filter=search_filter,
-                )
-                results = self.client.search(collection_name_for_search, search_request)
-        except (AttributeError, TypeError, Exception) as e:
-            # If all search methods fail, we can't do similarity search
-            import logging
-            logger = logging.getLogger("contract-insights-engine")
-            logger.error(f"[VectorDatabase] All search methods failed: {e}")
-            # Return empty results rather than using scroll (which doesn't do similarity search)
-            results = []
+        # Use search method (compatible with qdrant-client 1.6.x)
+        # In version 1.6.9, the search method exists and works correctly
+        results = self.client.search(**search_kwargs)
 
         formatted: List[Dict[str, Any]] = []
         for point in results:
             payload = point.payload or {}
-            # Handle both ScoredPoint (from search) and Record (from scroll) objects
-            # ScoredPoint has .score, Record doesn't
-            score = getattr(point, 'score', None)
-            if score is None:
-                # If no score (from scroll/Record), use 0.0 or calculate similarity if possible
-                score = 0.0
-            
             formatted.append(
                 {
                     "id": getattr(point, "id", None),
-                    "score": score,
+                    "score": point.score,
                     "content": payload.get("text") or payload.get("content", ""),
                     "source": payload.get("source", "unknown"),
                     "metadata": payload,

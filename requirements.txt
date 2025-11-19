@@ -5,7 +5,7 @@ mysql-connector-python
 pydantic
 requests
 pandas
-qdrant-client>=1.7.0
+qdrant-client==1.6.9
 tabulate
 pypdf
 # sentence-transformers - Only needed for ingestion scripts and embedding service, not main app runtime
