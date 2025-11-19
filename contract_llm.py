@@ -328,7 +328,52 @@ class VectorDatabase:
         if search_filter is not None:
             search_kwargs["query_filter"] = search_filter
 
-        results = self.client.search(**search_kwargs)
+        # Use the correct method based on qdrant-client version
+        # In newer versions (1.7+), use search_points or get collection first
+        collection_name_for_search = collection_override or self.collection
+        
+        # Try different API methods based on version
+        try:
+            # Method 1: Direct search (older versions)
+            if hasattr(self.client, 'search'):
+                results = self.client.search(**search_kwargs)
+            # Method 2: search_points (newer versions)
+            elif hasattr(self.client, 'search_points'):
+                search_result = self.client.search_points(**search_kwargs)
+                results = search_result.points if hasattr(search_result, 'points') else search_result
+            # Method 3: Get collection and search on it
+            else:
+                collection = self.client.get_collection(collection_name_for_search)
+                if hasattr(collection, 'query'):
+                    results = collection.query(**search_kwargs)
+                else:
+                    # Last resort: use query_points
+                    results, _ = self.client.scroll(
+                        collection_name=collection_name_for_search,
+                        scroll_filter=search_filter,
+                        limit=limit,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+        except AttributeError:
+            # Fallback: try to get collection and use its search method
+            try:
+                from qdrant_client.models import SearchRequest
+                search_request = SearchRequest(
+                    vector=query_vector,
+                    limit=limit,
+                    filter=search_filter,
+                )
+                results = self.client.search(collection_name_for_search, search_request)
+            except Exception:
+                # Final fallback: use scroll
+                results, _ = self.client.scroll(
+                    collection_name=collection_name_for_search,
+                    scroll_filter=search_filter,
+                    limit=limit,
+                    with_payload=True,
+                    with_vectors=False,
+                )
 
         formatted: List[Dict[str, Any]] = []
         for point in results:
