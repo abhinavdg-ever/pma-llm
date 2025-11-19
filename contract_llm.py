@@ -279,7 +279,23 @@ class VectorDatabase:
             logger.info(f"[VectorDatabase] Attempting to connect to Qdrant at {qdrant_url}, collection: {collection}")
             
             self.client = QdrantClient(url=qdrant_url, timeout=10)
-            self.client.get_collection(collection)  # Raises if missing.
+            # Try to get collection, but handle version mismatch gracefully
+            try:
+                self.client.get_collection(collection)  # Raises if missing or version mismatch
+            except Exception as get_collection_error:
+                # If it's a validation error (version mismatch), try to continue anyway
+                # The collection might still be accessible for search operations
+                import logging
+                logger = logging.getLogger("contract-insights-engine")
+                if "validation" in str(get_collection_error).lower() or "ParsingModel" in str(get_collection_error):
+                    logger.warning(
+                        f"[VectorDatabase] Version mismatch detected when getting collection info, but continuing. "
+                        f"Collection '{collection}' may still be accessible. Error: {get_collection_error}"
+                    )
+                    # Don't raise - try to continue as the collection might still work
+                else:
+                    # For other errors (collection missing, etc.), raise
+                    raise
             self.Filter = Filter
             self.FieldCondition = FieldCondition
             self.MatchValue = MatchValue
